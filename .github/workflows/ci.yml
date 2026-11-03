@@ -9,12 +9,20 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      DB_USER: test
-      DB_PASS: test
-      DB_NAME: test
-      DB_HOST: localhost
-      DB_PORT: "5432"
       API_TOKEN: test-token
+      API_BASE_URL: http://127.0.0.1:8000
+      DB_NAME: test
+      DB_PASS: test
+      DB_USER: test
+      DB_PORT: "5433"
+      DB_HOST: localhost
+      AWS_ENDPOINT_URL: http://127.0.0.1:4566
+      AWS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      SCORING_QUEUE_NAME: scoring-jobs
+      SCORING_DLQ_NAME: scoring-jobs-dlq
+      AUDIT_BUCKET_NAME: test-bucket
 
     steps:
       - uses: actions/checkout@v4
