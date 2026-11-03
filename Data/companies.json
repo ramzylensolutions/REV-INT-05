@@ -1,0 +1,602 @@
+[
+  {
+    "name": "BrightLeaf Systems",
+    "domain": "brightleafsys.com",
+    "employees": 13,
+    "country": "Japan"
+  },
+  {
+    "name": "BrightField Technologies",
+    "domain": "brightfieldtech.com",
+    "employees": 58,
+    "country": "India"
+  },
+  {
+    "name": "SilverForge Labs",
+    "domain": "silverforgelabs.com",
+    "employees": 56,
+    "country": "Singapore"
+  },
+  {
+    "name": "MapleField Solutions",
+    "domain": "maplefieldhq.com",
+    "employees": 42,
+    "country": "USA"
+  },
+  {
+    "name": "BluePath Solutions",
+    "domain": "bluepathhq.com",
+    "employees": 89,
+    "country": "India"
+  },
+  {
+    "name": "NorthWave Technologies",
+    "domain": "northwavetech.com",
+    "employees": 141,
+    "country": "USA"
+  },
+  {
+    "name": "FalconNest Technologies",
+    "domain": "falconnesttech.com",
+    "employees": 749,
+    "country": "India"
+  },
+  {
+    "name": "PeakWave Analytics",
+    "domain": "peakwaveio.com",
+    "employees": 45,
+    "country": "Australia"
+  },
+  {
+    "name": "LotusBridge Labs",
+    "domain": "lotusbridgelabs.com",
+    "employees": 246,
+    "country": "Australia"
+  },
+  {
+    "name": "RiverNest Technologies",
+    "domain": "rivernesttech.com",
+    "employees": 303,
+    "country": "USA"
+  },
+  {
+    "name": "StoneSpark Systems",
+    "domain": "stonesparksys.com",
+    "employees": 27,
+    "country": "India"
+  },
+  {
+    "name": "StoneWave Analytics",
+    "domain": "stonewaveio.com",
+    "employees": 186,
+    "country": "Japan"
+  },
+  {
+    "name": "RiverPath Solutions",
+    "domain": "riverpathhq.com",
+    "employees": 192,
+    "country": "India"
+  },
+  {
+    "name": "NorthLeaf Labs",
+    "domain": "northleaflabs.com",
+    "employees": 523,
+    "country": "United Kingdom"
+  },
+  {
+    "name": "AmberLine Labs",
+    "domain": "amberlinelabs.com",
+    "employees": 605,
+    "country": "Australia"
+  },
+  {
+    "name": "OceanPath Systems",
+    "domain": "oceanpathsys.com",
+    "employees": 40,
+    "country": "Germany"
+  },
+  {
+    "name": "StoneBridge Solutions",
+    "domain": "stonebridgehq.com",
+    "employees": 608,
+    "country": "USA"
+  },
+  {
+    "name": "IronWave Technologies",
+    "domain": "ironwavetech.com",
+    "employees": 356,
+    "country": "Australia"
+  },
+  {
+    "name": "CoralGrid Analytics",
+    "domain": "coralgridio.com",
+    "employees": 29,
+    "country": "Singapore"
+  },
+  {
+    "name": "OceanField Systems",
+    "domain": "oceanfieldsys.com",
+    "employees": 4525,
+    "country": "India"
+  },
+  {
+    "name": "CedarPath Solutions",
+    "domain": "cedarpathhq.com",
+    "employees": 21,
+    "country": "Germany"
+  },
+  {
+    "name": "CoralField Technologies",
+    "domain": "coralfieldtech.com",
+    "employees": 505,
+    "country": "Australia"
+  },
+  {
+    "name": "PixelBridge Labs",
+    "domain": "pixelbridgelabs.com",
+    "employees": 15,
+    "country": "Germany"
+  },
+  {
+    "name": "PixelLeaf Analytics",
+    "domain": "pixelleafio.com",
+    "employees": 54,
+    "country": "India"
+  },
+  {
+    "name": "LotusNest Labs",
+    "domain": "lotusnestlabs.com",
+    "employees": 41,
+    "country": "India"
+  },
+  {
+    "name": "SilverSpark Technologies",
+    "domain": "silversparktech.com",
+    "employees": 3181,
+    "country": "Brazil"
+  },
+  {
+    "name": "SwiftPath Solutions",
+    "domain": "swiftpathhq.com",
+    "employees": 1676,
+    "country": "USA"
+  },
+  {
+    "name": "SunGrid Systems",
+    "domain": "sungridsys.com",
+    "employees": 182,
+    "country": "United Kingdom"
+  },
+  {
+    "name": "BrightForge Labs",
+    "domain": "brightforgelabs.com",
+    "employees": 6,
+    "country": "Singapore"
+  },
+  {
+    "name": "NimbusForge Analytics",
+    "domain": "nimbusforgeio.com",
+    "employees": 9,
+    "country": "Canada"
+  },
+  {
+    "name": "GreenForge Technologies",
+    "domain": "greenforgetech.com",
+    "employees": 4521,
+    "country": "USA"
+  },
+  {
+    "name": "SilverField Labs",
+    "domain": "silverfieldlabs.com",
+    "employees": 36,
+    "country": "India"
+  },
+  {
+    "name": "NimbusPath Analytics",
+    "domain": "nimbuspathio.com",
+    "employees": 112,
+    "country": "Germany"
+  },
+  {
+    "name": "CedarForge Technologies",
+    "domain": "cedarforgetech.com",
+    "employees": 32,
+    "country": "USA"
+  },
+  {
+    "name": "CedarGrid Solutions",
+    "domain": "cedargridhq.com",
+    "employees": 255,
+    "country": "Canada"
+  },
+  {
+    "name": "MapleForge Analytics",
+    "domain": "mapleforgeio.com",
+    "employees": 158,
+    "country": "India"
+  },
+  {
+    "name": "BlueWave Labs",
+    "domain": "bluewavelabs.com",
+    "employees": 36,
+    "country": "Germany"
+  },
+  {
+    "name": "MapleGrid Technologies",
+    "domain": "maplegridtech.com",
+    "employees": 5,
+    "country": "USA"
+  },
+  {
+    "name": "CedarField Solutions",
+    "domain": "cedarfieldhq.com",
+    "employees": 23,
+    "country": "India"
+  },
+  {
+    "name": "GreenBridge Analytics",
+    "domain": "greenbridgeio.com",
+    "employees": 25,
+    "country": "India"
+  },
+  {
+    "name": "PixelField Labs",
+    "domain": "pixelfieldlabs.com",
+    "employees": 37,
+    "country": "India"
+  },
+  {
+    "name": "CoralWave Analytics",
+    "domain": "coralwaveio.com",
+    "employees": 20,
+    "country": "United Kingdom"
+  },
+  {
+    "name": "BrightBridge Labs",
+    "domain": "brightbridgelabs.com",
+    "employees": 60,
+    "country": "Australia"
+  },
+  {
+    "name": "SilverGrid Analytics",
+    "domain": "silvergridio.com",
+    "employees": 130,
+    "country": "USA"
+  },
+  {
+    "name": "MapleLine Labs",
+    "domain": "maplelinelabs.com",
+    "employees": 13,
+    "country": "Canada"
+  },
+  {
+    "name": "SunSpark Systems",
+    "domain": "sunsparksys.com",
+    "employees": 4832,
+    "country": "India"
+  },
+  {
+    "name": "BlueSpark Analytics",
+    "domain": "bluesparkio.com",
+    "employees": 1409,
+    "country": "India"
+  },
+  {
+    "name": "StonePath Systems",
+    "domain": "stonepathsys.com",
+    "employees": 450,
+    "country": "USA"
+  },
+  {
+    "name": "SunPath Solutions",
+    "domain": "sunpathhq.com",
+    "employees": 920,
+    "country": "USA"
+  },
+  {
+    "name": "FalconField Technologies",
+    "domain": "falconfieldtech.com",
+    "employees": 767,
+    "country": "USA"
+  },
+  {
+    "name": "BrightPath Systems",
+    "domain": "brightpathsys.com",
+    "employees": 11,
+    "country": "Japan"
+  },
+  {
+    "name": "SunBridge Labs",
+    "domain": "sunbridgelabs.com",
+    "employees": 408,
+    "country": "Canada"
+  },
+  {
+    "name": "StoneField Solutions",
+    "domain": "stonefieldhq.com",
+    "employees": 8,
+    "country": "India"
+  },
+  {
+    "name": "CedarNest Technologies",
+    "domain": "cedarnesttech.com",
+    "employees": 13,
+    "country": "Australia"
+  },
+  {
+    "name": "NimbusGrid Analytics",
+    "domain": "nimbusgridio.com",
+    "employees": 9,
+    "country": "Canada"
+  },
+  {
+    "name": "SwiftField Technologies",
+    "domain": "swiftfieldtech.com",
+    "employees": 796,
+    "country": "Singapore"
+  },
+  {
+    "name": "SwiftGrid Labs",
+    "domain": "swiftgridlabs.com",
+    "employees": 28,
+    "country": "India"
+  },
+  {
+    "name": "LotusForge Labs",
+    "domain": "lotusforgelabs.com",
+    "employees": 562,
+    "country": "Brazil"
+  },
+  {
+    "name": "SwiftForge Labs",
+    "domain": "swiftforgelabs.com",
+    "employees": 4320,
+    "country": "India"
+  },
+  {
+    "name": "CedarLeaf Labs",
+    "domain": "cedarleaflabs.com",
+    "employees": 540,
+    "country": "United Kingdom"
+  },
+  {
+    "name": "BrightGrid Technologies",
+    "domain": "brightgridtech.com",
+    "employees": 427,
+    "country": "India"
+  },
+  {
+    "name": "OceanLine Systems",
+    "domain": "oceanlinesys.com",
+    "employees": 433,
+    "country": "India"
+  },
+  {
+    "name": "BlueForge Solutions",
+    "domain": "blueforgehq.com",
+    "employees": 67,
+    "country": "Brazil"
+  },
+  {
+    "name": "StoneLine Analytics",
+    "domain": "stonelineio.com",
+    "employees": 187,
+    "country": "USA"
+  },
+  {
+    "name": "CoralBridge Systems",
+    "domain": "coralbridgesys.com",
+    "employees": 43,
+    "country": "United Kingdom"
+  },
+  {
+    "name": "LotusLine Solutions",
+    "domain": "lotuslinehq.com",
+    "employees": 180,
+    "country": "India"
+  },
+  {
+    "name": "PeakBridge Labs",
+    "domain": "peakbridgelabs.com",
+    "employees": 32,
+    "country": "India"
+  },
+  {
+    "name": "LotusGrid Technologies",
+    "domain": "lotusgridtech.com",
+    "employees": 4771,
+    "country": "USA"
+  },
+  {
+    "name": "FalconLine Technologies",
+    "domain": "falconlinetech.com",
+    "employees": 507,
+    "country": "Germany"
+  },
+  {
+    "name": "PeakNest Analytics",
+    "domain": "peaknestio.com",
+    "employees": 31,
+    "country": "Canada"
+  },
+  {
+    "name": "PeakPath Analytics",
+    "domain": "peakpathio.com",
+    "employees": 153,
+    "country": "Singapore"
+  },
+  {
+    "name": "BlueNest Systems",
+    "domain": "bluenestsys.com",
+    "employees": 42,
+    "country": "Singapore"
+  },
+  {
+    "name": "NorthSpark Solutions",
+    "domain": "northsparkhq.com",
+    "employees": 104,
+    "country": "Germany"
+  },
+  {
+    "name": "IronPath Technologies",
+    "domain": "ironpathtech.com",
+    "employees": 47,
+    "country": "Australia"
+  },
+  {
+    "name": "MaplePath Technologies",
+    "domain": "maplepathtech.com",
+    "employees": 35,
+    "country": "Australia"
+  },
+  {
+    "name": "AmberForge Solutions",
+    "domain": "amberforgehq.com",
+    "employees": 112,
+    "country": "India"
+  },
+  {
+    "name": "OceanLeaf Analytics",
+    "domain": "oceanleafio.com",
+    "employees": 12,
+    "country": "United Kingdom"
+  },
+  {
+    "name": "SwiftSpark Analytics",
+    "domain": "swiftsparkio.com",
+    "employees": 3438,
+    "country": "USA"
+  },
+  {
+    "name": "OceanBridge Analytics",
+    "domain": "oceanbridgeio.com",
+    "employees": 190,
+    "country": "United Kingdom"
+  },
+  {
+    "name": "CoralSpark Solutions",
+    "domain": "coralsparkhq.com",
+    "employees": 20,
+    "country": "Australia"
+  },
+  {
+    "name": "SilverNest Labs",
+    "domain": "silvernestlabs.com",
+    "employees": 25,
+    "country": "Germany"
+  },
+  {
+    "name": "SilverPath Labs",
+    "domain": "silverpathlabs.com",
+    "employees": 49,
+    "country": "India"
+  },
+  {
+    "name": "MapleWave Solutions",
+    "domain": "maplewavehq.com",
+    "employees": 188,
+    "country": "United Kingdom"
+  },
+  {
+    "name": "BlueBridge Solutions",
+    "domain": "bluebridgehq.com",
+    "employees": 140,
+    "country": "USA"
+  },
+  {
+    "name": "PeakGrid Analytics",
+    "domain": "peakgridio.com",
+    "employees": 759,
+    "country": "Singapore"
+  },
+  {
+    "name": "RiverSpark Labs",
+    "domain": "riversparklabs.com",
+    "employees": 36,
+    "country": "India"
+  },
+  {
+    "name": "PeakLine Solutions",
+    "domain": "peaklinehq.com",
+    "employees": 678,
+    "country": "India"
+  },
+  {
+    "name": "GreenNest Solutions",
+    "domain": "greennesthq.com",
+    "employees": 166,
+    "country": "USA"
+  },
+  {
+    "name": "NorthGrid Systems",
+    "domain": "northgridsys.com",
+    "employees": 631,
+    "country": "USA"
+  },
+  {
+    "name": "NimbusLeaf Systems",
+    "domain": "nimbusleafsys.com",
+    "employees": 9,
+    "country": "Brazil"
+  },
+  {
+    "name": "GreenLeaf Labs",
+    "domain": "greenleaflabs.com",
+    "employees": 6,
+    "country": "Australia"
+  },
+  {
+    "name": "MapleSpark Systems",
+    "domain": "maplesparksys.com",
+    "employees": 371,
+    "country": "Singapore"
+  },
+  {
+    "name": "FalconWave Labs",
+    "domain": "falconwavelabs.com",
+    "employees": 1442,
+    "country": "Singapore"
+  },
+  {
+    "name": "SilverBridge Labs",
+    "domain": "silverbridgelabs.com",
+    "employees": 24,
+    "country": "Canada"
+  },
+  {
+    "name": "GreenLine Analytics",
+    "domain": "greenlineio.com",
+    "employees": 144,
+    "country": "India"
+  },
+  {
+    "name": "PixelLine Technologies",
+    "domain": "pixellinetech.com",
+    "employees": 701,
+    "country": "India"
+  },
+  {
+    "name": "CedarLine Solutions",
+    "domain": "cedarlinehq.com",
+    "employees": 645,
+    "country": "India"
+  },
+  {
+    "name": "PixelNest Analytics",
+    "domain": "pixelnestio.com",
+    "employees": 751,
+    "country": "Brazil"
+  },
+  {
+    "name": "IronSpark Solutions",
+    "domain": "ironsparkhq.com",
+    "employees": 806,
+    "country": "USA"
+  },
+  {
+    "name": "NorthForge Technologies",
+    "domain": "northforgetech.com",
+    "employees": 33,
+    "country": "USA"
+  }
+]

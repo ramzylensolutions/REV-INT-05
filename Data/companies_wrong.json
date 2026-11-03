@@ -1,0 +1,69 @@
+[
+  {
+    "name": "Vertex Messy Domain Co",
+    "domain": "https://WWW.VertexMessy.com/",
+    "employees": 900,
+    "country": "India"
+  },
+  {
+    "name": "Willow Path Path Co",
+    "domain": "http://willowpathco.com/about/team",
+    "employees": 250,
+    "country": "USA"
+  },
+  {
+    "name": "Xenon Spaces Co",
+    "domain": "   XenonSpaces.COM   ",
+    "employees": 70,
+    "country": "Canada"
+  },
+  {
+    "name": "Yarrow No Employees Ltd",
+    "domain": "yarrownoemp.com",
+    "country": "India"
+  },
+  {
+    "name": "Zephyr No Country Ltd",
+    "domain": "zephyrnocountry.com",
+    "employees": 1500
+  },
+  {
+    "name": "Alder Nothing Extra Ltd",
+    "domain": "aldernothing.com"
+  },
+  {
+    "name": "Birch Null Values Ltd",
+    "domain": "birchnull.com",
+    "employees": null,
+    "country": null
+  },
+  {
+    "name": "Vertex Duplicate Copy",
+    "domain": "vertexmessy.com",
+    "employees": 10,
+    "country": "Japan"
+  },
+  {
+    "domain": "nonamecompany.com",
+    "employees": 100,
+    "country": "USA"
+  },
+  {
+    "name": "Cedar Bad Number Ltd",
+    "domain": "cedarbadnumber.com",
+    "employees": "abc",
+    "country": "India"
+  },
+  {
+    "name": "No Domain At All Ltd",
+    "employees": 300,
+    "country": "USA"
+  },
+  "just a string, not a company",
+  {
+    "name": "Elm Last Good One",
+    "domain": "elmlastgood.com",
+    "employees": 55,
+    "country": "Germany"
+  }
+]
