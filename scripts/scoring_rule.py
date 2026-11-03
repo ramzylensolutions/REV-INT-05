@@ -28,6 +28,6 @@ def calculate_score(employees, country):
         market = 10
 
     score = size + market
-    stage = "qualified" if score > THRESHOLD else "disqualified"
+    stage = "qualified" if score >= THRESHOLD else "disqualified"
 
     return {"size": size, "market": market, "score": score, "stage": stage}
