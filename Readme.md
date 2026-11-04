@@ -380,3 +380,18 @@ Each test has a comment explaining which bug it would catch.
 
 GitHub Actions (`.github/workflows/ci.yml`) runs the full test suite on every
 push and pull request, with a real PostgreSQL service and fake settings.
+
+## Quick start with Docker (one command)
+
+```
+docker compose up --build
+```
+
+This starts PostgreSQL, LocalStack, creates the queues and bucket, runs the
+migrations, and starts the API and the worker. Then, in another terminal:
+
+```
+python import_trigger.py companies_20.json
+```
+
+For a completely fresh start: `docker compose down -v`, then `docker compose up --build`.
