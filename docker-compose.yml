@@ -1,0 +1,77 @@
+x-app-env: &app-env
+  api_token: ${api_token:-change-me}
+  db_name: revenue_project
+  db_user: postgres
+  db_pass: postgres
+  db_host: postgres
+  db_port: "5432"
+  AWS_ENDPOINT_URL: http://localstack:4566
+  AWS_REGION: us-east-1
+  AWS_ACCESS_KEY_ID: test
+  AWS_SECRET_ACCESS_KEY: test
+  SCORING_QUEUE_NAME: scoring-jobs
+  SCORING_DLQ_NAME: scoring-jobs-dlq
+  AUDIT_BUCKET_NAME: scoring-audit
+  PYTHONUNBUFFERED: "1"
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: revenue_project
+    ports:
+      - "5434:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 30s
+      retries: 20
+
+  localstack:
+    image: localstack/localstack:4.4
+    environment:
+      SERVICES: sqs,s3
+    ports:
+      - "4566:4566"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4566/_localstack/health"]
+      interval: 3s
+      retries: 30
+
+  setup:
+    build: .
+    command: python scripts/setup_queues.py
+    environment: *app-env
+    depends_on:
+      localstack:
+        condition: service_healthy
+
+  api:
+    build: .
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    environment: *app-env
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      setup:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/docs')"]
+      interval: 3s
+      retries: 30
+
+  worker:
+    build: .
+    command: python -m scripts.main
+    environment: *app-env
+    depends_on:
+      api:
+        condition: service_healthy
+
+volumes:
+  pgdata:
