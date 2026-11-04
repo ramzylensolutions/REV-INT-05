@@ -5,11 +5,14 @@ load_dotenv()
 import pytest,json,os,httpx
 from contextlib import asynccontextmanager
 from app.main import app
-TEST_DB_NAME = os.getenv("test_db_name")
-TEST_DB_USER = os.getenv("test_db_user")
-TEST_DB_PASS = os.getenv("test_db_pass")
-TEST_DB_HOST = os.getenv("test_db_host")
-TEST_DB_PORT = int(os.getenv("test_db_port"))
+def env(name):
+    return os.getenv(name.upper()) or os.getenv(name.lower())
+
+TEST_DB_NAME = env("test_db_name")
+TEST_DB_USER = env("test_db_user")
+TEST_DB_PASS = env("test_db_pass")
+TEST_DB_HOST = env("test_db_host")
+TEST_DB_PORT = int(env("test_db_port"))
 @asynccontextmanager
 async def create_a_pool():
     pool = await asyncpg.create_pool(
@@ -50,7 +53,7 @@ async def client(pool, fake_sqs):
     app.state.queue_url = "fake-queue"
 
     transport = httpx.ASGITransport(app=app)
-    headers = {"Authorization": f"Bearer {os.getenv('api_token')}"}
+    headers = {"Authorization": f"Bearer {env('api_token')}"}
 
     async with httpx.AsyncClient(transport=transport, base_url="http://test", headers=headers) as c:
         yield c
