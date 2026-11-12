@@ -23,5 +23,5 @@ async def ranking(
     return [dict(row) for row in rows]
 
 
-'''Invoke-RestMethod -Uri "http://127.0.0.1:8000/ranking" -Headers $headers |
+'''Invoke-RestMethod -Url "http://127.0.0.1:8000/ranking" -Headers $headers |
     Format-Table name, score, employees, country, stage'''
