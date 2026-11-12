@@ -34,7 +34,7 @@ async def score_account(account_id,pool):
                 account_id, score, stage,
                 json.dumps({"size": calc["size"], "market": calc["market"]}),
             )
-            if account["stage"] != stage  and account["stage"] != None:
+            if account["stage"] != stage:
                 await connection.execute(
                     """insert into history (account_id, event_type, stage, details)
                        values ($1, 'stage_changed', $2, $3)""",
