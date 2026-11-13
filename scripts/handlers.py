@@ -35,13 +35,28 @@ async def score_account(account_id,pool):
                 json.dumps({"size": calc["size"], "market": calc["market"]}),
             )
             if account["stage"] != stage:
-                await connection.execute(
+                stage_event_id = await connection.fetchval(
                     """insert into history (account_id, event_type, stage, details)
-                       values ($1, 'stage_changed', $2, $3)""",
+                       values ($1, 'stage_changed', $2, $3) returning id""",
                     account_id, stage,
-                    json.dumps({"from": account["stage"], "to": stage}),
-                )
+                    json.dumps({"from": account["stage"], "to": stage}),)
 
+                if stage == "qualified":
+                    details = {
+                    "name": account["name"],
+                    "domain": account["domain"],
+                    "score": score,
+                    "employees": account["employees"],
+                    "country": account["country"],
+                }
+                    await connection.execute(
+                        """
+                        INSERT INTO notifications (account_id, source_event_id, details)
+                        VALUES ($1, $2, $3::jsonb)
+                        """,
+                        account_id, stage_event_id, json.dumps(details),
+                        )
+                
     return {
         "Scored_at": datetime.now(timezone.utc).isoformat(),
         "Account_id": str(account_id),
