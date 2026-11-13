@@ -98,3 +98,19 @@ async def test_alert_points_to_its_stage_changed_history_row(pool):
         account_id,
     )
     assert source_event_id == history_id
+@pytest.mark.asyncio
+async def test_rescore_while_qualified_records_skip_in_history(pool):
+    account_id = await create_account(pool, employees=450, country="India")  # 85, qualified
+
+    await score_account(account_id, pool)
+    await score_account(account_id, pool)  # still qualified
+
+    rows = await pool.fetch(
+        """
+        SELECT details FROM history
+        WHERE account_id = $1 AND event_type = 'alert_skipped'
+        """,
+        account_id,
+    )
+    assert len(rows) == 1
+    assert json.loads(rows[0]["details"])["reason"] == "already_qualified"

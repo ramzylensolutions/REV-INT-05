@@ -56,6 +56,14 @@ async def score_account(account_id,pool):
                         """,
                         account_id, stage_event_id, json.dumps(details),
                         )
+            elif stage == "qualified":
+                await connection.execute(
+                        """
+                        INSERT INTO history (account_id, event_type, details)
+                        VALUES ($1, 'alert_skipped', $2::jsonb)
+                        """,
+                        account_id, json.dumps({"reason": "already_qualified"}),
+    )
                 
     return {
         "Scored_at": datetime.now(timezone.utc).isoformat(),
