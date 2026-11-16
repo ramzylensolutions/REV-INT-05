@@ -19,7 +19,7 @@ async def rescore(account_id:UUID,update:update_account,request:Request,connecti
             country = coalesce($2, country)
             where id = $3""",update.employees,update.country,account_id
         )
-        event_type = "stage_changed"
+        event_type = "updated"
         details = {"employees": update.employees, "country": update.country}
         await connection.execute(
             """insert into history(account_id,event_type,details)values($1,$2,$3)""",account_id,event_type,json.dumps(details)

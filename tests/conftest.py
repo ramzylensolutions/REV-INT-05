@@ -31,8 +31,7 @@ async def pool():
         await run_migration(test_pool)
 
         async with test_pool.acquire() as connection:
-            await connection.execute("truncate table accounts, history")
-
+            await connection.execute("truncate table accounts, history, notifications")
         yield test_pool
 
 class FakeSQS:

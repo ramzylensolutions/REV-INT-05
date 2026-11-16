@@ -8,8 +8,13 @@ from scripts.slack_settings import is_slack_enabled, set_slack_enabled
 
 
 async def main(action: str) -> None:
-    settings = Settings()
-    conn = await asyncpg.connect(settings.database_url)
+    conn = await asyncpg.connect(
+        user=Settings.db_user,
+        password=Settings.db_pass,
+        database=Settings.db_name,
+        host=Settings.db_host,
+        port=Settings.db_port,
+    )
     try:
         if action == "on":
             await set_slack_enabled(conn, True)

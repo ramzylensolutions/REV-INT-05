@@ -42,7 +42,7 @@ async def test_rescore_adds_updated_to_history(client, pool):
 
     async with pool.acquire() as connection:
         event = await connection.fetchval("select event_type from history where account_id = $1", account_id)
-    assert event == "stage_changed"
+    assert event == "updated"
 
 
 async def test_two_rescores_get_different_keys(client, pool, fake_sqs):

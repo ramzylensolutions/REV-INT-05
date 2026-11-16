@@ -1,0 +1,2459 @@
+﻿
+===== .github\workflows\ci.yml =====
+
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: revenue_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      API_TOKEN: test-token
+      API_BASE_URL: http://127.0.0.1:8000
+      DB_NAME: test
+      DB_PASS: test
+      DB_USER: test
+      DB_PORT: "5432"
+      DB_HOST: localhost
+      AWS_ENDPOINT_URL: http://127.0.0.1:4566
+      AWS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      SCORING_QUEUE_NAME: scoring-jobs
+      SCORING_DLQ_NAME: scoring-jobs-dlq
+      AUDIT_BUCKET_NAME: test-bucket
+      TEST_DB_NAME: revenue_test
+      TEST_DB_USER: postgres
+      TEST_DB_PASS: postgres
+      TEST_DB_HOST: localhost
+      TEST_DB_PORT: "5432"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run tests
+        run: python -m pytest -v
+
+===== app\dependencies\auth.py =====
+
+from fastapi import HTTPException,Request
+from ..config import Settings
+import secrets
+async def verify_token(request:Request):
+    authorization = request.headers.get("Authorization")
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(
+            status_code=401,
+            detail="Missing or invalid Authorization header",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    token = authorization[len("Bearer "):]
+    if not secrets.compare_digest(token,Settings.api_token):
+        raise HTTPException(
+            status_code=401,
+            detail="Wrong credentials",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+===== app\dependencies\get_a_pool.py =====
+
+from fastapi import Request
+async def get_a_pool(request:Request):
+    pool = request.app.state.pool
+    async with pool.acquire() as connection:
+        yield connection
+
+===== app\models\create_companies.py =====
+
+from pydantic import BaseModel,field_validator,Field
+from uuid import UUID
+from typing import Literal,Optional
+class create_companies(BaseModel):
+    name:str
+    domain:str
+    employees: Optional[int] = None
+    country: Optional[str] = None
+    @field_validator("domain")
+    @classmethod
+    def clean_domain(cls, value):
+        value = value.strip()
+        value = value.lower()
+        if value.startswith("https://"):
+            value = value[8:]
+        elif value.startswith("http://"):
+            value = value[7:]
+        if value.startswith("www."):
+            value = value[4:]
+        value = value.split("/")[0]
+        return value
+class Sorted_Account(BaseModel):
+    id: UUID
+    name: str
+    domain: str
+    employees: Optional[int] = None
+    country: Optional[str] = None
+    score: Optional[int] = Field(default=None, ge=0, le=100)
+    stage: Optional[Literal["qualified", "disqualified"]] = None
+class update_account(BaseModel):
+    employees: Optional[int]=None
+    country: Optional[str]=None
+
+===== app\routers\insert_companies.py =====
+
+from fastapi import APIRouter,Depends,HTTPException,Request
+from ..dependencies.auth import verify_token
+from ..models.create_companies import create_companies
+from ..dependencies.get_a_pool import get_a_pool
+import asyncpg,asyncio
+import json,uuid
+router = APIRouter(tags=["companies"],dependencies=[Depends(verify_token)])
+@router.post("/companies",status_code=201)
+async def insert_company(company:create_companies,request:Request,connection=Depends(get_a_pool)):
+    idempotency_key = str(uuid.uuid4())
+    try:
+        sql = """insert into accounts (name, domain, employees, country) values ($1, $2, $3, $4)
+        returning id """
+        sql1="""insert into history(account_id,event_type,details)values($1,$2,$3)"""
+        created="created"
+        details={"Created_from":"Import command"}
+        async with connection.transaction():
+            account_id=await connection.fetchval(sql,company.name,company.domain,company.employees,company.country)
+            await connection.execute(sql1,account_id,created,json.dumps(details))
+        await asyncio.to_thread(request.app.state.sqs.send_message,
+                                QueueUrl=request.app.state.queue_url,
+                                MessageBody=json.dumps({"account_id": str(account_id),"task": "score_account","idempotency_key": idempotency_key,}),)
+    except asyncpg.UniqueViolationError:
+        raise HTTPException(
+                status_code=409,
+                detail=f"Company with domain '{company.domain}' already exists",
+            )
+    return "Inserted Successfully"
+
+===== app\routers\ranking.py =====
+
+from typing import Literal, Optional
+
+from fastapi import APIRouter, Depends
+from ..dependencies.auth import verify_token
+from ..dependencies.get_a_pool import get_a_pool
+from ..models.create_companies import Sorted_Account
+
+router_2 = APIRouter(tags=["companies"], dependencies=[Depends(verify_token)])
+
+
+@router_2.get("/ranking", response_model=list[Sorted_Account])
+async def ranking(
+    stage: Optional[Literal["qualified", "disqualified"]] = None,
+    Connection=Depends(get_a_pool),
+):
+    order = "order by score desc nulls last, employees desc nulls last, name asc"
+
+    if stage:
+        rows = await Connection.fetch(f"select * from accounts where stage = $1 {order}", stage)
+    else:
+        rows = await Connection.fetch(f"select * from accounts {order}")
+
+    return [dict(row) for row in rows]
+
+
+'''Invoke-RestMethod -Url "http://127.0.0.1:8000/ranking" -Headers $headers |
+    Format-Table name, score, employees, country, stage'''
+
+===== app\routers\rescore.py =====
+
+from fastapi import APIRouter,Depends,HTTPException,Request
+from ..dependencies.auth import verify_token
+from ..dependencies.get_a_pool import get_a_pool
+import uuid,asyncio,json
+from ..models.create_companies import update_account
+from uuid import UUID
+router3 = APIRouter(tags=["companies"],dependencies=[Depends(verify_token)])
+@router3.post("/accounts/{account_id}/rescore",status_code=202)
+async def rescore(account_id:UUID,update:update_account,request:Request,connection = Depends(get_a_pool)):
+    idempotency = str(uuid.uuid4())
+    sql="""select id from accounts where id = $1"""
+    found = await connection.fetchval(sql,account_id)
+    if found is None:
+        raise HTTPException(status_code=404, detail="The company doesn't exist")
+    async with connection.transaction():
+        await connection.execute(
+            """update accounts
+            set employees = coalesce($1, employees),
+            country = coalesce($2, country)
+            where id = $3""",update.employees,update.country,account_id
+        )
+        event_type = "stage_changed"
+        details = {"employees": update.employees, "country": update.country}
+        await connection.execute(
+            """insert into history(account_id,event_type,details)values($1,$2,$3)""",account_id,event_type,json.dumps(details)
+        )
+
+    await asyncio.to_thread(request.app.state.sqs.send_message,
+                                    QueueUrl=request.app.state.queue_url,
+                                    MessageBody=json.dumps({"account_id": str(account_id),"task": "score_account","idempotency_key": idempotency,}),)
+
+    return {"account_id": str(account_id), "status": "queued"}
+
+===== app\config.py =====
+
+from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import SecretStr
+class settings(BaseSettings):
+    db_name : str
+    db_pass:str
+    db_user:str
+    db_host:str
+    db_port:int
+    api_token:str
+    slack_webhook_url: SecretStr | None = None
+    AUDIT_BUCKET_NAME:str
+    model_config=SettingsConfigDict(
+        env_file=".env",
+        extra="ignore"
+    )
+Settings = settings()
+
+===== app\db_conn.py =====
+
+import asyncpg
+from .config import Settings
+async def create_pool():
+    pool = await asyncpg.create_pool(
+        user=Settings.db_user,
+        password=Settings.db_pass,
+        database=Settings.db_name,
+        host=Settings.db_host,
+        port=Settings.db_port
+    )
+    return pool
+
+===== app\main.py =====
+
+from fastapi import FastAPI
+from contextlib import asynccontextmanager
+from .db_conn import create_pool
+import os
+from .routers.insert_companies import router
+from .routers.ranking import router_2
+from .routers.rescore import router3
+import boto3
+from dotenv import load_dotenv
+load_dotenv()
+
+async def run_migration(pool):
+    async with pool.acquire() as connection:
+        migration_directory = os.path.join(os.path.dirname(__file__), "..", "sql_migrations")
+        sql="""
+                create table if not exists track_migration (
+                    filename text primary key,
+                    applied_at timestamptz not null default current_timestamp
+                )
+            """
+        await connection.execute(sql)
+        applied = {row[0] for row in (await connection.fetch("""select filename from track_migration"""))}
+        for filename in sorted(os.listdir(migration_directory)):
+            if filename in applied or not filename.endswith(".sql"):
+                continue
+            with open (os.path.join(migration_directory,filename),encoding="utf-8") as f:
+                await connection.execute(f.read())
+                await connection.execute("""insert into track_migration(filename) values($1)""",filename)
+@asynccontextmanager
+async def lifespan(app:FastAPI):
+    app.state.sqs = boto3.client("sqs",
+                                endpoint_url=os.getenv("AWS_ENDPOINT_URL"),
+                                region_name=os.getenv("AWS_REGION"),
+                                aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
+                                aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),)
+    app.state.queue_url = app.state.sqs.get_queue_url(QueueName=os.getenv("SCORING_QUEUE_NAME"))["QueueUrl"]
+    app.state.pool = await create_pool()
+    print("The Database connection pool created Successfully")
+    await run_migration(app.state.pool)
+    yield
+    print("The Database connection has been closed")
+    await app.state.pool.close()
+
+
+app = FastAPI(lifespan=lifespan)
+
+app.include_router(router)
+app.include_router(router_2)
+app.include_router(router3)
+
+===== scripts\check_s3.py =====
+
+import os
+import json
+import boto3
+from dotenv import load_dotenv
+
+load_dotenv()
+
+s3 = boto3.client(
+    "s3",
+    endpoint_url=os.getenv("AWS_ENDPOINT_URL"),
+    region_name=os.getenv("AWS_REGION"),
+    aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
+    aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
+)
+
+bucket = os.getenv("AUDIT_BUCKET_NAME")
+
+# List all files
+response = s3.list_objects_v2(Bucket=bucket)
+files = response.get("Contents", [])
+print(f"Total files: {len(files)}")
+
+for item in files[:5]:
+    print(item["Key"])
+
+# Open the first file and print its content
+if files:
+    obj = s3.get_object(Bucket=bucket, Key=files[0]["Key"])
+    print(json.dumps(json.loads(obj["Body"].read()), indent=2))
+
+===== scripts\handlers.py =====
+
+import json
+from datetime import datetime, timezone
+from scripts.scoring_rule import calculate_score, RULE_VERSION, THRESHOLD
+
+class MalformedJob(Exception):
+    """A job that can never succeed: bad JSON, unknown type, or missing fields."""
+
+
+def require(job: dict, *fields: str) -> None:
+    missing = [field for field in fields if field not in job]
+    if missing:
+        raise MalformedJob(f"missing field(s): {', '.join(missing)}")
+
+async def score_account(account_id,pool):
+    async with pool.acquire() as connection:
+        account = await connection.fetchrow(
+       """select name , domain, employees, country, stage from accounts where id = $1""",
+        account_id,
+        )
+        if account is None:
+            raise MalformedJob(f"account {account_id} not found")
+        calc = calculate_score(account["employees"], account["country"])
+        score = calc["score"]
+        stage = calc["stage"]
+
+        async with connection.transaction():
+            await connection.execute(
+                "update accounts set score = $1, stage = $2 where id = $3",
+                score, stage, account_id,
+            )
+            await connection.execute(
+                """insert into history (account_id, event_type, score, stage, scored_at, details)
+                   values ($1, 'scored', $2, $3, now(), $4)""",
+                account_id, score, stage,
+                json.dumps({"size": calc["size"], "market": calc["market"]}),
+            )
+            if account["stage"] != stage:
+                stage_event_id = await connection.fetchval(
+                    """insert into history (account_id, event_type, stage, details)
+                       values ($1, 'stage_changed', $2, $3) returning id""",
+                    account_id, stage,
+                    json.dumps({"from": account["stage"], "to": stage}),)
+
+                if stage == "qualified":
+                    details = {
+                    "name": account["name"],
+                    "domain": account["domain"],
+                    "score": score,
+                    "employees": account["employees"],
+                    "country": account["country"],
+                }
+                    await connection.execute(
+                        """
+                        INSERT INTO notifications (account_id, source_event_id, details)
+                        VALUES ($1, $2, $3::jsonb)
+                        """,
+                        account_id, stage_event_id, json.dumps(details),
+                        )
+            elif stage == "qualified":
+                await connection.execute(
+                        """
+                        INSERT INTO history (account_id, event_type, details)
+                        VALUES ($1, 'alert_skipped', $2::jsonb)
+                        """,
+                        account_id, json.dumps({"reason": "already_qualified"}),
+    )
+                
+    return {
+        "Scored_at": datetime.now(timezone.utc).isoformat(),
+        "Account_id": str(account_id),
+        "Company_Name": account["name"],
+        "Domain": account["domain"],
+        "Employees": account["employees"],
+        "Country": account["country"],
+        "Rule-Version": RULE_VERSION,
+        "Points.Size": calc["size"],
+        "Points.Market": calc["market"],
+        "Threshold": THRESHOLD,
+        "Score": score,
+        "Stage": stage,
+        "Previous-Stage": account["stage"],
+    }
+
+===== scripts\idempotency.py =====
+
+import json
+
+from botocore.exceptions import ClientError
+def _key_path(idempotency_key: str) -> str:
+    return f"idempotency/{idempotency_key}.json"
+
+
+def already_done(s3, bucket: str, idempotency_key: str) -> dict | None:
+    try:
+        obj = s3.get_object(Bucket=bucket, Key=_key_path(idempotency_key))
+    except ClientError as error:
+        if error.response["Error"]["Code"] in ("NoSuchKey", "404"):
+            return None
+        raise
+    return json.loads(obj["Body"].read())
+
+def mark_done(s3, bucket: str, idempotency_key: str, record: dict) -> None:
+    s3.put_object(
+        Bucket=bucket,
+        Key=_key_path(idempotency_key),
+        Body=json.dumps(record),
+        ContentType="application/json",
+    )
+
+===== scripts\main.py =====
+
+import asyncpg
+import os
+from contextlib import asynccontextmanager
+import boto3
+from dotenv import load_dotenv
+import asyncio
+from app.config import Settings
+import json,signal
+from scripts.handlers import MalformedJob,require,score_account
+from scripts.idempotency import already_done, mark_done
+load_dotenv()
+stop = False
+def handle_stop(signum, frame):
+    global stop
+    print("Stop signal received: finishing the current message, then exiting")
+    stop = True
+@asynccontextmanager
+async def create_pool():
+    pool = await asyncpg.create_pool(
+        user=Settings.db_user,
+        password=Settings.db_pass,
+        database=Settings.db_name,
+        host=Settings.db_host,
+        port=Settings.db_port
+    )
+    yield pool
+    await pool.close()
+HANDLERS={"score_account":score_account}
+def parse_job(body: str) -> dict:
+    try:
+        job = json.loads(body)
+    except json.JSONDecodeError as error:
+        raise MalformedJob(f"bad JSON: {error}")
+
+    if not isinstance(job, dict):
+        raise MalformedJob("body is not a JSON object")
+
+    require(job, "account_id","task", "idempotency_key")
+
+    if job["task"] not in HANDLERS:
+        raise MalformedJob(f"unknown job_type: {job['task']}")
+
+    return job
+
+async def main():
+    signal.signal(signal.SIGTERM, handle_stop)  
+    signal.signal(signal.SIGINT, handle_stop)
+
+    sqs = boto3.client(
+    "sqs",
+    endpoint_url=os.getenv("AWS_ENDPOINT_URL"),
+    region_name=os.getenv("AWS_REGION"),
+    aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
+    aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
+    )
+    s3 = boto3.client(
+    "s3",
+    endpoint_url=os.getenv("AWS_ENDPOINT_URL"),
+    region_name=os.getenv("AWS_REGION"),
+    aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
+    aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
+    )
+    queue_url = sqs.get_queue_url(QueueName=os.getenv("SCORING_QUEUE_NAME"))["QueueUrl"]
+    dlq_url =  sqs.get_queue_url(QueueName=os.getenv("SCORING_DLQ_NAME"))["QueueUrl"]
+    async with create_pool() as pool:
+        while not stop:
+            response = await asyncio.to_thread(
+                sqs.receive_message,
+                QueueUrl=queue_url,
+                MaxNumberOfMessages=10,
+                WaitTimeSeconds=20,
+            )
+            messages = response.get("Messages",[])
+            if not messages:
+                print("No messages, pulling again")
+                continue
+            for message in messages:
+                message_id = message["MessageId"]
+                print("Got message:", message_id, message["Body"])
+                try:
+                    job = parse_job(message["Body"])
+                    key = job["idempotency_key"]
+
+                    previous = await asyncio.to_thread(already_done,s3,Settings.AUDIT_BUCKET_NAME, key)
+                    if previous is not None:
+                        sqs.delete_message(QueueUrl=queue_url, ReceiptHandle=message["ReceiptHandle"])
+                        print("Duplicate, skipped:", message_id, "key", key)
+                        continue
+
+                    handler = HANDLERS[job["task"]]    
+                    result = await handler(job["account_id"],pool)
+
+                    await asyncio.to_thread(mark_done,s3,Settings.AUDIT_BUCKET_NAME, key, {
+                        "job_type": job["task"],
+                        "message_id": message_id,
+                        "result": result,
+                    })
+                except MalformedJob as error:
+                    sqs.send_message(
+                        QueueUrl=dlq_url,
+                        MessageBody=message["Body"],
+                        MessageAttributes={
+                            "error": {"DataType": "String", "StringValue": str(error)},
+                            "original_message_id": {"DataType": "String", "StringValue": message_id},
+                        },
+                    )
+                    sqs.delete_message(QueueUrl=queue_url, ReceiptHandle=message["ReceiptHandle"])
+                    print("Parked malformed message:", message_id, error)
+                    continue
+                except Exception as error:
+                    print("Handler failed, not deleting:", message_id, error)
+                    continue
+                sqs.delete_message(QueueUrl=queue_url, ReceiptHandle=message["ReceiptHandle"])
+                print("Done:", message_id, result)
+    print("Worker stopped cleanly")
+
+if __name__ == "__main__":
+    asyncio.run(main())
+
+===== scripts\purge_queue.py =====
+
+import boto3
+import os
+from dotenv import load_dotenv
+load_dotenv()
+sqs = boto3.client(
+    "sqs",
+    endpoint_url=os.getenv("AWS_ENDPOINT_URL"),
+    region_name=os.getenv("AWS_REGION"),
+    aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
+    aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
+)
+queue_url= sqs.get_queue_url(
+    QueueName=os.getenv("SCORING_QUEUE_NAME"))["QueueUrl"]
+sqs.purge_queue(QueueUrl=queue_url)
+print("Queue Purged")
+
+===== scripts\scoring_rule.py =====
+
+RULE_VERSION = "v1"
+THRESHOLD = 60
+TIER_1 = {"India", "USA"}
+TIER_2 = {"United Kingdom", "Germany", "Singapore", "Australia", "Canada"}
+
+
+def calculate_score(employees, country):
+    if employees is None:
+        size = 0
+    elif employees >= 1000:
+        size = 60
+    elif employees >= 200:
+        size = 45
+    elif employees >= 50:
+        size = 30
+    elif employees >= 1:
+        size = 15
+    else:
+        size = 0
+
+    if not country:
+        market = 0
+    elif country in TIER_1:
+        market = 40
+    elif country in TIER_2:
+        market = 25
+    else:
+        market = 10
+
+    score = size + market
+    stage = "qualified" if score >= THRESHOLD else "disqualified"
+
+    return {"size": size, "market": market, "score": score, "stage": stage}
+
+===== scripts\setup_queues.py =====
+
+import os
+import boto3
+from dotenv import load_dotenv
+import json
+load_dotenv()
+sqs = boto3.client(
+    "sqs",
+    endpoint_url=os.getenv("AWS_ENDPOINT_URL"),
+    region_name=os.getenv("AWS_REGION"),
+    aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
+    aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
+)
+dlq = sqs.create_queue(QueueName=os.getenv("SCORING_DLQ_NAME"))
+dlq_url = dlq["QueueUrl"]
+
+dlq_attributes = sqs.get_queue_attributes(
+    QueueUrl=dlq_url,
+    AttributeNames=["QueueArn"],
+)
+dlq_arn = dlq_attributes["Attributes"]["QueueArn"]
+
+
+redrive_policy = {
+    "deadLetterTargetArn": dlq_arn,
+    "maxReceiveCount": "3",
+}
+
+jobs = sqs.create_queue(
+    QueueName=os.getenv("SCORING_QUEUE_NAME"),
+    Attributes={
+        "RedrivePolicy": json.dumps(redrive_policy),
+        "VisibilityTimeout": "30",
+    },
+)
+jobs_url = jobs["QueueUrl"]
+print(sqs.get_queue_attributes(
+    QueueUrl=jobs_url,
+    AttributeNames=["ApproximateNumberOfMessages"],
+)["Attributes"])
+
+s3 = boto3.client(
+    "s3",
+    endpoint_url=os.getenv("AWS_ENDPOINT_URL"),
+    region_name=os.getenv("AWS_REGION"),
+    aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
+    aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),)
+s3.create_bucket(Bucket=os.getenv("AUDIT_BUCKET_NAME"))
+
+===== scripts\slack_client.py =====
+
+from dataclasses import dataclass
+
+import httpx
+
+@dataclass
+class SendResult:
+    outcome: str                   
+    error: str | None = None      
+    retry_after: int | None = None 
+
+
+class SlackClient:
+    def __init__(self, webhook_url: str, timeout_seconds: float = 5.0, transport=None):  # â† new
+        self._webhook_url = webhook_url
+        self._timeout = timeout_seconds
+        self._transport = transport                                                      # â† new
+
+    async def send(self, payload: dict) -> SendResult:
+        try:
+            async with httpx.AsyncClient(timeout=self._timeout, transport=self._transport) as client:  # â† new
+                response = await client.post(self._webhook_url, json=payload)
+        except httpx.TimeoutException:
+            return SendResult("retry", "timeout")
+        except httpx.HTTPError as exc:
+            return SendResult("retry", type(exc).__name__)
+
+        if response.status_code == 200:
+            return SendResult("sent")
+
+        if response.status_code == 429:
+            return SendResult("rate_limited", "rate_limited",
+                              retry_after=_parse_retry_after(response))
+
+        if response.status_code >= 500:
+            return SendResult("retry", f"http {response.status_code}")
+
+        return SendResult("park", f"http {response.status_code}: {response.text[:100]}")
+
+
+def _parse_retry_after(response: httpx.Response) -> int:
+    try:
+        return max(1, int(response.headers.get("Retry-After", "30")))
+    except ValueError:
+        return 30
+
+===== scripts\slack_settings.py =====
+
+async def is_slack_enabled(conn) -> bool:
+    value = await conn.fetchval(
+        "SELECT value FROM settings WHERE key = 'slack_enabled'"
+    )
+    return value == "true"
+
+
+async def set_slack_enabled(conn, enabled: bool) -> None:
+    await conn.execute(
+        """
+        INSERT INTO settings (key, value, updated_at)
+        VALUES ('slack_enabled', $1, now())
+        ON CONFLICT (key) DO UPDATE
+            SET value = EXCLUDED.value, updated_at = now()
+        """,
+        "true" if enabled else "false",
+    )
+
+===== scripts\slack_switch.py =====
+
+import argparse
+import asyncio
+
+import asyncpg
+
+from app.config import Settings
+from scripts.slack_settings import is_slack_enabled, set_slack_enabled
+
+
+async def main(action: str) -> None:
+    settings = Settings()
+    conn = await asyncpg.connect(settings.database_url)
+    try:
+        if action == "on":
+            await set_slack_enabled(conn, True)
+        elif action == "off":
+            await set_slack_enabled(conn, False)
+
+        enabled = await is_slack_enabled(conn)
+        updated_at = await conn.fetchval(
+            "SELECT updated_at FROM settings WHERE key = 'slack_enabled'"
+        )
+        print(f"Slack notifications: {'ON' if enabled else 'OFF'} (last changed {updated_at})")
+    finally:
+        await conn.close()
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Turn Slack notifications on or off")
+    parser.add_argument("action", choices=["on", "off", "status"])
+    args = parser.parse_args()
+    asyncio.run(main(args.action))
+
+===== sql_migrations\001_create_accounts.sql =====
+
+create table if not exists accounts (
+    id uuid primary key default gen_random_uuid(),
+    name text not null,
+    domain text not null unique,
+    employees integer,
+    country text,
+    score integer check (score >= 0 and score <= 100),
+    stage text check (stage in ('qualified', 'disqualified'))
+);
+
+===== sql_migrations\002_create_history.sql =====
+
+create table if not exists history (
+    id uuid primary key default gen_random_uuid(),
+    account_id uuid not null,
+    event_type text not null check (event_type in ('created', 'scored', 'stage_changed')),
+    details jsonb,
+    created_at timestamptz not null default now()
+);
+
+create index if not exists idx_history_account_id on history (account_id);
+
+===== sql_migrations\003_add_score_columns_to_history.sql =====
+
+alter table history add column if not exists score integer;
+alter table history add column if not exists stage text;
+alter table history add column if not exists scored_at timestamptz;
+
+===== sql_migrations\004_notification.sql =====
+
+create table if not exists notifications (
+    id uuid primary key default gen_random_uuid(),
+    account_id uuid not null,
+    source_event_id uuid not null unique,
+    status text not null default 'pending'
+        check (status in ('pending', 'sent', 'skipped', 'parked')),
+    attempts integer not null default 0,
+    next_attempt_at timestamptz not null default now(),
+    last_error text,
+    details jsonb not null,
+    created_at timestamptz not null default now(),
+    sent_at timestamptz
+);
+
+create index if not exists notifications_status_next_attempt_idx
+    on notifications (status, next_attempt_at);
+
+===== sql_migrations\006_alert_history_events.sql =====
+
+alter table history
+    drop constraint if exists history_event_type_check;
+
+alter table history
+    add constraint history_event_type_check
+    check (event_type in (
+        'created',
+        'scored',
+        'stage_changed',
+        'updated',
+        'alert_sent',
+        'alert_failed',
+        'alert_parked',
+        'alert_skipped',
+        'alert_resent'
+    ));
+
+===== sql_migrations\007_settings.sql =====
+
+create table if not exists settings (
+    key text primary key,
+    value text not null,
+    updated_at timestamptz not null default now()
+);
+
+insert into settings (key, value)
+values ('slack_enabled', 'true')
+on conflict (key) do nothing;
+
+===== tests\apply_migration.py =====
+
+import os
+
+
+async def run_migration(pool):
+    migration_directory = os.path.join(os.path.dirname(__file__), "..", "sql_migrations")
+
+    async with pool.acquire() as connection:
+        await connection.execute(
+            """
+            create table if not exists track_migration (
+                filename text primary key,
+                applied_at timestamptz not null default current_timestamp
+            )
+            """
+        )
+
+        rows = await connection.fetch("select filename from track_migration")
+        applied = {row[0] for row in rows}
+
+        for filename in sorted(os.listdir(migration_directory)):
+            if filename in applied or not filename.endswith(".sql"):
+                continue
+
+            with open(os.path.join(migration_directory, filename), encoding="utf-8") as f:
+                sql_text = f.read()
+
+            async with connection.transaction():
+                await connection.execute(sql_text)
+                await connection.execute(
+                    "insert into track_migration (filename) values ($1)", filename
+                )
+
+===== tests\conftest.py =====
+
+from tests.apply_migration import run_migration
+from dotenv import load_dotenv
+import asyncpg
+load_dotenv()
+import pytest,json,os,httpx
+from contextlib import asynccontextmanager
+from app.main import app
+def env(name):
+    return os.getenv(name.upper()) or os.getenv(name.lower())
+
+TEST_DB_NAME = env("test_db_name")
+TEST_DB_USER = env("test_db_user")
+TEST_DB_PASS = env("test_db_pass")
+TEST_DB_HOST = env("test_db_host")
+TEST_DB_PORT = int(env("test_db_port"))
+@asynccontextmanager
+async def create_a_pool():
+    pool = await asyncpg.create_pool(
+        user = TEST_DB_USER,
+        password= TEST_DB_PASS,
+        database=TEST_DB_NAME,
+        host=TEST_DB_HOST,
+        port=TEST_DB_PORT
+    )
+    yield pool
+    await pool.close()
+
+@pytest.fixture
+async def pool():
+    async with create_a_pool() as test_pool:
+        await run_migration(test_pool)
+
+        async with test_pool.acquire() as connection:
+            await connection.execute("truncate table accounts, history")
+
+        yield test_pool
+
+class FakeSQS:
+    def __init__(self):
+        self.messages = []
+
+    def send_message(self, QueueUrl, MessageBody):
+        self.messages.append(json.loads(MessageBody))
+        return {"MessageId": "fake-id"}
+@pytest.fixture
+def fake_sqs():
+    return FakeSQS()
+
+@pytest.fixture
+async def client(pool, fake_sqs):
+    app.state.pool = pool
+    app.state.sqs = fake_sqs
+    app.state.queue_url = "fake-queue"
+
+    transport = httpx.ASGITransport(app=app)
+    headers = {"Authorization": f"Bearer {env('api_token')}"}
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://test", headers=headers) as c:
+        yield c
+
+===== tests\fake_slack.py =====
+
+
+===== tests\test_companies.py =====
+
+# Tests for POST /companies (the import endpoint)
+
+
+async def count_rows(pool, table):
+    async with pool.acquire() as connection:
+        return await connection.fetchval(f"select count(*) from {table}")
+
+
+async def test_new_company_is_created(client, pool):
+    # Bug caught: valid companies not saved
+    response = await client.post(
+        "/companies",
+        json={"name": "Aurora", "domain": "aurora.com", "employees": 2400, "country": "India"},
+    )
+    assert response.status_code == 201
+    assert await count_rows(pool, "accounts") == 1
+
+
+async def test_messy_domain_is_stored_clean(client, pool):
+    # Bug caught: https://WWW.Example.com/ stored as-is
+    await client.post("/companies", json={"name": "Example", "domain": "https://WWW.Example.com/"})
+
+    async with pool.acquire() as connection:
+        domain = await connection.fetchval("select domain from accounts")
+    assert domain == "example.com"
+
+
+async def test_created_row_is_added_to_history(client, pool):
+    # Bug caught: account saved without its "created" history row
+    await client.post("/companies", json={"name": "Aurora", "domain": "aurora.com"})
+
+    async with pool.acquire() as connection:
+        event = await connection.fetchval("select event_type from history")
+    assert event == "created"
+
+
+async def test_scoring_job_is_sent(client, fake_sqs):
+    # Bug caught: account saved but never scored (no job sent)
+    await client.post("/companies", json={"name": "Aurora", "domain": "aurora.com"})
+
+    assert len(fake_sqs.messages) == 1
+    assert fake_sqs.messages[0]["task"] == "score_account"
+
+
+async def test_duplicate_returns_409(client):
+    # Bug caught: the same company created twice
+    company = {"name": "Aurora", "domain": "aurora.com"}
+    await client.post("/companies", json=company)
+    response = await client.post("/companies", json=company)
+    assert response.status_code == 409
+
+
+async def test_duplicate_does_not_send_a_second_job(client, pool, fake_sqs):
+    # Bug caught: re-importing scores the same account twice
+    company = {"name": "Aurora", "domain": "aurora.com"}
+    await client.post("/companies", json=company)
+    await client.post("/companies", json=company)
+
+    assert len(fake_sqs.messages) == 1
+    assert await count_rows(pool, "history") == 1
+
+
+async def test_messy_and_clean_domain_are_duplicates(client):
+    # Bug caught: duplicate check bypassed by writing the domain differently
+    await client.post("/companies", json={"name": "Example", "domain": "example.com"})
+    response = await client.post("/companies", json={"name": "Example", "domain": "https://WWW.Example.com/"})
+    assert response.status_code == 409
+
+
+async def test_missing_employees_and_country_is_accepted(client):
+    # Bug caught: companies with missing data rejected instead of imported
+    response = await client.post("/companies", json={"name": "Alder", "domain": "alder.com"})
+    assert response.status_code == 201
+
+
+async def test_missing_name_returns_422(client, fake_sqs):
+    # Bug caught: incomplete records saved
+    response = await client.post("/companies", json={"domain": "noname.com"})
+    assert response.status_code == 422
+    assert fake_sqs.messages == []
+
+
+async def test_text_employees_returns_422(client):
+    # Bug caught: "abc" accepted as an employee count
+    response = await client.post(
+        "/companies", json={"name": "Cedar", "domain": "cedar.com", "employees": "abc"}
+    )
+    assert response.status_code == 422
+
+
+async def test_no_token_returns_401(client):
+    # Bug caught: auth accidentally removed
+    response = await client.post(
+        "/companies",
+        json={"name": "Aurora", "domain": "aurora.com"},
+        headers={"Authorization": ""},
+    )
+    assert response.status_code == 401
+
+
+async def test_wrong_token_returns_401(client):
+    # Bug caught: any token accepted
+    response = await client.post(
+        "/companies",
+        json={"name": "Aurora", "domain": "aurora.com"},
+        headers={"Authorization": "Bearer wrong"},
+    )
+    assert response.status_code == 401
+
+===== tests\test_domain_cleaning.py =====
+
+import pytest
+from pydantic import ValidationError
+from app.models.create_companies import create_companies
+
+def make(domain, **extra):
+    return create_companies(name="Test Co", domain=domain, **extra)
+
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        ("https://WWW.Example.com/", "example.com"),   # the exact case from the ticket
+        ("http://example.com", "example.com"),
+        ("https://example.com", "example.com"),
+        ("www.example.com", "example.com"),
+        ("WWW.EXAMPLE.COM", "example.com"),
+        ("example.com/about", "example.com"),
+        ("http://example.com/about/team", "example.com"),
+        ("  Example.COM  ", "example.com"),
+        ("example.com", "example.com"),                 # already clean: unchanged
+    ],
+)
+def test_domain_is_cleaned(raw, expected):
+    # Bug caught: messy domains stored as-is, so the same company
+    # could be imported twice under two different spellings
+    assert make(raw).domain == expected
+
+
+def test_messy_and_clean_domain_become_identical():
+    # Bug caught: duplicate protection failing because cleaning
+    # produces different results for the same company
+    assert make("https://WWW.Example.com/").domain == make("example.com").domain
+
+
+def test_www_inside_the_name_is_kept():
+    # Bug caught: removing "www" from the middle of a domain
+    # instead of only from the start
+    assert make("mywwwsite.com").domain == "mywwwsite.com"
+
+
+# ---------------------------------------------------------------
+# Required and optional fields
+# ---------------------------------------------------------------
+
+def test_missing_employees_is_allowed():
+    # Bug caught: companies with missing employees rejected (422)
+    # instead of imported and scored. The ticket requires they still get an account.
+    company = create_companies(name="Test Co", domain="example.com", country="India")
+    assert company.employees is None
+
+
+def test_missing_country_is_allowed():
+    # Bug caught: same as above, for country
+    company = create_companies(name="Test Co", domain="example.com", employees=100)
+    assert company.country is None
+
+
+def test_explicit_nulls_are_allowed():
+    # Bug caught: null values in the file rejected instead of treated as missing
+    company = create_companies(name="Test Co", domain="example.com", employees=None, country=None)
+    assert company.employees is None
+    assert company.country is None
+
+
+def test_missing_name_is_rejected():
+    # Bug caught: companies without a name accepted
+    with pytest.raises(ValidationError):
+        create_companies(domain="example.com")
+
+
+def test_missing_domain_is_rejected():
+    # Bug caught: companies without a domain accepted; without a domain
+    # there is no way to detect duplicates
+    with pytest.raises(ValidationError):
+        create_companies(name="Test Co")
+
+
+def test_text_employee_count_is_rejected():
+    # Bug caught: "abc" accepted as an employee count
+    with pytest.raises(ValidationError):
+        make("example.com", employees="abc")
+
+
+def test_numeric_text_employee_count_is_converted():
+    # Documents current behaviour: "1300" (text) is converted to 1300
+    assert make("example.com", employees="1300").employees == 1300
+
+===== tests\test_notificaiton.py =====
+
+import json
+import uuid
+
+import pytest
+
+from scripts.handlers import score_account
+
+
+
+async def create_account(pool, employees, country):
+    account_id = uuid.uuid4()
+    await pool.execute(
+        """
+        INSERT INTO accounts (id, name, domain, employees, country)
+        VALUES ($1, $2, $3, $4, $5)
+        """,
+        account_id, "Acme Corp", "acm.com", employees, country,
+    )
+    return account_id
+
+
+async def change_company(pool, account_id, employees, country):
+    await pool.execute(
+        "UPDATE accounts SET employees = $2, country = $3 WHERE id = $1",
+        account_id, employees, country,
+    )
+
+
+async def count_alerts(pool, account_id):
+    return await pool.fetchval(
+        "SELECT count(*) FROM notifications WHERE account_id = $1", account_id
+    )
+
+async def test_becoming_qualified_creates_one_alert(pool):
+    account_id = await create_account(pool, employees=450, country="India")  # 45 + 40 = 85
+
+    await score_account(account_id, pool)
+
+    row = await pool.fetchrow(
+        "SELECT status, attempts, details FROM notifications WHERE account_id = $1",
+        account_id,
+    )
+    assert row is not None
+    assert row["status"] == "pending"
+    assert row["attempts"] == 0
+    details = json.loads(row["details"])
+    assert details["name"] == "Acme Corp"
+    assert details["score"] == 85
+
+
+
+async def test_scoring_again_while_qualified_creates_no_new_alert(pool):
+    account_id = await create_account(pool, employees=450, country="India")
+
+    await score_account(account_id, pool)
+    await score_account(account_id, pool)  # same job again / rescore, still qualified
+
+    assert await count_alerts(pool, account_id) == 1
+
+
+
+async def test_disqualified_account_creates_no_alert(pool):
+    account_id = await create_account(pool, employees=120, country="Brazil")  # 30 + 10 = 40
+
+    await score_account(account_id, pool)
+
+    assert await count_alerts(pool, account_id) == 0
+
+
+
+async def test_qualified_disqualified_qualified_creates_two_alerts(pool):
+    account_id = await create_account(pool, employees=450, country="India")   # 85, qualified
+    await score_account(account_id, pool)
+
+    await change_company(pool, account_id, employees=120, country="Brazil")   # 40, disqualified
+    await score_account(account_id, pool)
+
+    await change_company(pool, account_id, employees=450, country="Germany")  # 70, qualified
+    await score_account(account_id, pool)
+
+    assert await count_alerts(pool, account_id) == 2
+
+
+
+async def test_alert_points_to_its_stage_changed_history_row(pool):
+    account_id = await create_account(pool, employees=450, country="India")
+
+    await score_account(account_id, pool)
+
+    source_event_id = await pool.fetchval(
+        "SELECT source_event_id FROM notifications WHERE account_id = $1", account_id
+    )
+    history_id = await pool.fetchval(
+        """
+        SELECT id FROM history
+        WHERE account_id = $1 AND event_type = 'stage_changed' AND stage = 'qualified'
+        """,
+        account_id,
+    )
+    assert source_event_id == history_id
+@pytest.mark.asyncio
+async def test_rescore_while_qualified_records_skip_in_history(pool):
+    account_id = await create_account(pool, employees=450, country="India")  # 85, qualified
+
+    await score_account(account_id, pool)
+    await score_account(account_id, pool)  # still qualified
+
+    rows = await pool.fetch(
+        """
+        SELECT details FROM history
+        WHERE account_id = $1 AND event_type = 'alert_skipped'
+        """,
+        account_id,
+    )
+    assert len(rows) == 1
+    assert json.loads(rows[0]["details"])["reason"] == "already_qualified"
+
+===== tests\test_parse_job.py =====
+
+import json
+
+import pytest
+
+from scripts.handlers import MalformedJob, require
+from scripts.main import parse_job
+
+
+def body(**fields):
+    """Turn keyword arguments into a JSON message body."""
+    return json.dumps(fields)
+
+
+VALID = {
+    "task": "score_account",
+    "account_id": "31ae6896-8097-4920-83db-97e211f8acaf",
+    "idempotency_key": "7f3a9c2e-1b4d-4e8a-9c6f-2d5e8a1b3c7f",
+}
+
+
+# ---------------------------------------------------------------
+# parse_job: valid messages
+# ---------------------------------------------------------------
+
+def test_valid_job_is_returned_as_dict():
+    # Bug caught: good messages rejected or changed while parsing
+    job = parse_job(body(**VALID))
+    assert job == VALID
+
+
+def test_extra_fields_are_allowed():
+    # Bug caught: messages rejected just because they carry an extra field
+    job = parse_job(body(**VALID, rescore=True))
+    assert job["task"] == "score_account"
+
+
+# ---------------------------------------------------------------
+# parse_job: malformed messages (must raise MalformedJob, so they are
+# parked in the DLQ instead of retried forever)
+# ---------------------------------------------------------------
+
+def test_bad_json_is_malformed():
+    # Bug caught: broken JSON crashing with a normal error and retrying forever
+    with pytest.raises(MalformedJob):
+        parse_job("{not valid json")
+
+
+def test_empty_body_is_malformed():
+    with pytest.raises(MalformedJob):
+        parse_job("")
+
+
+@pytest.mark.parametrize("raw", ['"just a string"', "[1, 2, 3]", "42", "null"])
+def test_body_that_is_not_an_object_is_malformed(raw):
+    # Bug caught: valid JSON that is not an object (string, list, number)
+    # crashing later with a confusing error
+    with pytest.raises(MalformedJob):
+        parse_job(raw)
+
+
+@pytest.mark.parametrize("missing", ["task", "account_id", "idempotency_key"])
+def test_missing_required_field_is_malformed(missing):
+    # Bug caught: a message without a required field reaching the handler and crashing
+    fields = {k: v for k, v in VALID.items() if k != missing}
+    with pytest.raises(MalformedJob) as error:
+        parse_job(body(**fields))
+    assert missing in str(error.value)
+
+
+def test_unknown_task_is_malformed():
+    # Bug caught: unknown task types retried forever instead of parked
+    with pytest.raises(MalformedJob):
+        parse_job(body(**{**VALID, "task": "delete_everything"}))
+
+
+def test_task_name_is_case_sensitive():
+    # Bug caught: "Score_account" accepted while HANDLERS only knows "score_account"
+    with pytest.raises(MalformedJob):
+        parse_job(body(**{**VALID, "task": "Score_account"}))
+
+
+# ---------------------------------------------------------------
+# require
+# ---------------------------------------------------------------
+
+def test_require_passes_when_all_fields_present():
+    require({"a": 1, "b": 2}, "a", "b")  # no error means pass
+
+
+def test_require_lists_every_missing_field():
+    # Bug caught: only the first missing field reported, hiding the others
+    with pytest.raises(MalformedJob) as error:
+        require({}, "task", "account_id")
+    message = str(error.value)
+    assert "task" in message
+    assert "account_id" in message
+
+
+def test_require_treats_none_value_as_present():
+    # Documents current behaviour: require only checks that the key exists.
+    # A key with value None passes here; the handler must cope with it.
+    require({"account_id": None}, "account_id")
+
+===== tests\test_ranking.py =====
+
+# Tests for GET /ranking
+
+
+async def add_account(pool, name, domain, employees=None, country=None, score=None, stage=None):
+    async with pool.acquire() as connection:
+        return await connection.fetchval(
+            """insert into accounts (name, domain, employees, country, score, stage)
+               values ($1, $2, $3, $4, $5, $6) returning id""",
+            name, domain, employees, country, score, stage,
+        )
+
+
+def names(response):
+    return [account["name"] for account in response.json()]
+
+
+async def test_highest_score_first(client, pool):
+    # Bug caught: list not sorted, or sorted lowest first
+    await add_account(pool, "Low", "low.com", 10, "Japan", 25, "disqualified")
+    await add_account(pool, "High", "high.com", 2400, "India", 100, "qualified")
+    await add_account(pool, "Mid", "mid.com", 749, "India", 85, "qualified")
+
+    response = await client.get("/ranking")
+    assert response.status_code == 200
+    assert names(response) == ["High", "Mid", "Low"]
+
+
+async def test_same_score_more_employees_first(client, pool):
+    # Bug caught: missing tie-break
+    await add_account(pool, "Smaller", "smaller.com", 150, "India", 70, "qualified")
+    await add_account(pool, "Bigger", "bigger.com", 3100, "Japan", 70, "qualified")
+
+    response = await client.get("/ranking")
+    assert names(response) == ["Bigger", "Smaller"]
+
+
+async def test_same_score_and_employees_ordered_by_name(client, pool):
+    # Bug caught: last tie-break (name A-Z) missing
+    await add_account(pool, "Zeta", "zeta.com", 500, "India", 85, "qualified")
+    await add_account(pool, "Alpha", "alpha.com", 500, "India", 85, "qualified")
+
+    response = await client.get("/ranking")
+    assert names(response) == ["Alpha", "Zeta"]
+
+
+async def test_unscored_accounts_are_last(client, pool):
+    # Bug caught: unscored accounts shown at the top
+    await add_account(pool, "Not Scored", "notscored.com", 5000, "USA")
+    await add_account(pool, "Scored", "scored.com", 10, "Japan", 25, "disqualified")
+
+    response = await client.get("/ranking")
+    assert names(response) == ["Scored", "Not Scored"]
+
+
+async def test_filter_qualified(client, pool):
+    # Bug caught: stage filter ignored
+    await add_account(pool, "Q", "q.com", 2400, "India", 100, "qualified")
+    await add_account(pool, "D", "d.com", 10, "Japan", 25, "disqualified")
+
+    response = await client.get("/ranking", params={"stage": "qualified"})
+    assert names(response) == ["Q"]
+
+
+async def test_filter_disqualified(client, pool):
+    await add_account(pool, "Q", "q.com", 2400, "India", 100, "qualified")
+    await add_account(pool, "D", "d.com", 10, "Japan", 25, "disqualified")
+
+    response = await client.get("/ranking", params={"stage": "disqualified"})
+    assert names(response) == ["D"]
+
+
+async def test_unknown_stage_returns_422(client):
+    # Bug caught: any stage accepted; the ticket wants the allowed values listed
+    response = await client.get("/ranking", params={"stage": "banana"})
+    assert response.status_code == 422
+    assert "qualified" in response.text
+
+
+async def test_no_accounts_returns_empty_list(client):
+    # Bug caught: crash when the table is empty
+    response = await client.get("/ranking")
+    assert response.status_code == 200
+    assert response.json() == []
+
+===== tests\test_rescore.py =====
+
+# Tests for POST /accounts/{account_id}/rescore
+import uuid
+
+
+async def add_account(pool, name, domain, employees=None, country=None):
+    async with pool.acquire() as connection:
+        return await connection.fetchval(
+            """insert into accounts (name, domain, employees, country)
+               values ($1, $2, $3, $4) returning id""",
+            name, domain, employees, country,
+        )
+
+
+async def test_rescore_returns_202_and_sends_job(client, pool, fake_sqs):
+    # Bug caught: rescore accepted but no job sent to the worker
+    account_id = await add_account(pool, "Bright", "bright.com", 13, "Japan")
+
+    response = await client.post(f"/accounts/{account_id}/rescore", json={"employees": 1300})
+
+    assert response.status_code == 202
+    assert len(fake_sqs.messages) == 1
+    assert fake_sqs.messages[0]["account_id"] == str(account_id)
+
+
+async def test_rescore_updates_only_the_sent_field(client, pool):
+    # Bug caught: corrected data not saved, or other fields wiped to null
+    account_id = await add_account(pool, "Bright", "bright.com", 13, "Japan")
+
+    await client.post(f"/accounts/{account_id}/rescore", json={"employees": 1300})
+
+    async with pool.acquire() as connection:
+        row = await connection.fetchrow("select employees, country from accounts where id = $1", account_id)
+    assert row["employees"] == 1300
+    assert row["country"] == "Japan"
+
+
+async def test_rescore_adds_updated_to_history(client, pool):
+    # Bug caught: data correction not recorded
+    account_id = await add_account(pool, "Bright", "bright.com", 13, "Japan")
+
+    await client.post(f"/accounts/{account_id}/rescore", json={"employees": 1300})
+
+    async with pool.acquire() as connection:
+        event = await connection.fetchval("select event_type from history where account_id = $1", account_id)
+    assert event == "stage_changed"
+
+
+async def test_two_rescores_get_different_keys(client, pool, fake_sqs):
+    # Bug caught: second rescore skipped by the worker as a duplicate
+    account_id = await add_account(pool, "Bright", "bright.com", 13, "Japan")
+
+    await client.post(f"/accounts/{account_id}/rescore", json={"employees": 1300})
+    await client.post(f"/accounts/{account_id}/rescore", json={"employees": 1400})
+
+    first, second = fake_sqs.messages
+    assert first["idempotency_key"] != second["idempotency_key"]
+
+
+async def test_unknown_account_returns_404(client, fake_sqs):
+    # Bug caught: rescoring an account that doesn't exist
+    response = await client.post(f"/accounts/{uuid.uuid4()}/rescore", json={"employees": 1300})
+    assert response.status_code == 404
+    assert fake_sqs.messages == []
+
+
+async def test_bad_account_id_returns_422(client):
+    # Bug caught: a bad id crashing the API with a 500
+    response = await client.post("/accounts/not-a-uuid/rescore", json={"employees": 1300})
+    assert response.status_code == 422
+
+===== tests\test_scoring_rule.py =====
+
+import pytest
+
+from scripts.scoring_rule import calculate_score, THRESHOLD, TIER_1, TIER_2
+@pytest.mark.parametrize(
+    "employees, expected_size",
+    [
+        (5000, 60),
+        (1000, 60),  # exact boundary: 1000 is top tier
+        (999, 45),   # just below: catches using > 1000 instead of >= 1000
+        (200, 45),   # exact boundary
+        (199, 30),
+        (50, 30),    # exact boundary
+        (49, 15),
+        (1, 15),     # smallest real company
+    ],
+)
+def test_size_points_by_employee_count(employees, expected_size):
+    # Bug caught: wrong points for a size band, or off-by-one at a boundary
+    assert calculate_score(employees, "Japan")["size"] == expected_size
+
+
+def test_zero_employees_gets_no_size_points():
+    # Bug caught: 0 employees treated as a small company (15 points)
+    assert calculate_score(0, "Japan")["size"] == 0
+
+
+def test_negative_employees_gets_no_size_points():
+    # Bug caught: bad data giving points or crashing
+    assert calculate_score(-10, "Japan")["size"] == 0
+
+
+def test_missing_employees_gets_no_size_points():
+    # Bug caught: crash on None (e.g. None > 999 raises TypeError)
+    assert calculate_score(None, "Japan")["size"] == 0
+
+
+@pytest.mark.parametrize("country", sorted(TIER_1))
+def test_tier_1_countries_get_40(country):
+    # Bug caught: Tier 1 country getting the wrong points
+    assert calculate_score(10, country)["market"] == 40
+
+
+@pytest.mark.parametrize("country", sorted(TIER_2))
+def test_tier_2_countries_get_25(country):
+    # Bug caught: Tier 2 country missing from the list
+    assert calculate_score(10, country)["market"] == 25
+
+
+def test_india_gets_exactly_40_not_50():
+    # Bug caught: two separate ifs instead of if/elif, so India also
+    # falls into the "other country" branch and gets +10 extra
+    assert calculate_score(10, "India")["market"] == 40
+
+
+def test_united_kingdom_full_name_is_tier_2():
+    # Bug caught: list using "UK" while the data uses "United Kingdom"
+    assert calculate_score(10, "United Kingdom")["market"] == 25
+
+
+@pytest.mark.parametrize("country", ["Japan", "Brazil", "France"])
+def test_other_countries_get_10(country):
+    # Bug caught: unknown countries getting 0 or Tier points
+    assert calculate_score(10, country)["market"] == 10
+
+
+def test_missing_country_gets_no_market_points():
+    # Bug caught: crash on None, or None treated as "other country" (10)
+    assert calculate_score(10, None)["market"] == 0
+
+
+def test_empty_country_gets_no_market_points():
+    # Bug caught: empty string treated as a real country
+    assert calculate_score(10, "")["market"] == 0
+
+
+def test_country_match_is_case_sensitive():
+    # Documents current behaviour: "india" (lowercase) is not "India".
+    # If this test starts failing, the rule changed on purpose or by accident.
+    assert calculate_score(10, "india")["market"] == 10
+
+
+
+def test_score_is_size_plus_market():
+    # Bug caught: score calculated from the wrong parts
+    result = calculate_score(749, "India")
+    assert result["score"] == result["size"] + result["market"] == 85
+
+
+def test_missing_country_keeps_size_points():
+    # Bug caught: a missing country resetting the whole score to 0
+    result = calculate_score(1500, None)
+    assert result["size"] == 60
+    assert result["score"] == 60
+
+
+def test_maximum_score_is_100():
+    # Bug caught: points adding up to more than 100
+    assert calculate_score(5000, "USA")["score"] == 100
+
+
+def test_missing_everything_scores_0():
+    # Bug caught: crash or a non-zero default for an empty record
+    result = calculate_score(None, None)
+    assert result["score"] == 0
+    assert result["stage"] == "disqualified"
+
+
+def test_score_exactly_at_threshold_is_qualified():
+    # Bug caught: using > instead of >= for the threshold
+    result = calculate_score(1500, None)  # 60 + 0
+    assert result["score"] == THRESHOLD
+    assert result["stage"] == "qualified"
+
+
+def test_score_just_below_threshold_is_disqualified():
+    # Bug caught: threshold set too low, or stage not set at all
+    result = calculate_score(30, "India")  # 15 + 40 = 55
+    assert result["score"] < THRESHOLD
+    assert result["stage"] == "disqualified"
+
+
+@pytest.mark.parametrize(
+    "employees, country, expected_score, expected_stage",
+    [
+        (2400, "India", 100, "qualified"),
+        (1200, "Germany", 85, "qualified"),
+        (3100, "Japan", 70, "qualified"),
+        (150, "India", 70, "qualified"),
+        (520, "Brazil", 55, "disqualified"),
+        (120, "Japan", 40, "disqualified"),
+        (3, "Japan", 25, "disqualified"),
+    ],
+)
+def test_examples_from_companies_20_file(employees, country, expected_score, expected_stage):
+    # Bug caught: the rule no longer matching the hand-checked ranking table
+    result = calculate_score(employees, country)
+    assert result["score"] == expected_score
+    assert result["stage"] == expected_stage
+
+
+def test_result_has_all_expected_keys():
+    # Bug caught: a key renamed or removed, which would break the handler
+    result = calculate_score(100, "India")
+    assert set(result.keys()) == {"size", "market", "score", "stage"}
+
+
+def test_stage_is_always_a_known_value():
+    # Bug caught: a stage value the database check constraint would reject
+    for employees in [None, 0, 10, 100, 500, 5000]:
+        for country in [None, "India", "Germany", "Japan"]:
+            assert calculate_score(employees, country)["stage"] in {"qualified", "disqualified"}
+
+===== tests\test_scoring_rule_.py =====
+
+# Tests for the worker's scoring handler (called directly, no queue)
+import pytest
+
+from scripts.handlers import MalformedJob, score_account
+
+
+async def add_account(pool, name, domain, employees=None, country=None):
+    async with pool.acquire() as connection:
+        return await connection.fetchval(
+            """insert into accounts (name, domain, employees, country)
+               values ($1, $2, $3, $4) returning id""",
+            name, domain, employees, country,
+        )
+
+
+async def get_account(pool, account_id):
+    async with pool.acquire() as connection:
+        return await connection.fetchrow("select score, stage from accounts where id = $1", account_id)
+
+
+async def get_events(pool, account_id):
+    async with pool.acquire() as connection:
+        rows = await connection.fetch(
+            "select event_type, score from history where account_id = $1", account_id
+        )
+    return rows
+
+
+async def test_score_and_stage_saved_in_accounts(pool):
+    # Bug caught: score calculated but not saved
+    account_id = await add_account(pool, "Aurora", "aurora.com", 2400, "India")
+
+    await score_account(account_id, pool)
+
+    account = await get_account(pool, account_id)
+    assert account["score"] == 100
+    assert account["stage"] == "qualified"
+
+
+async def test_first_scoring_adds_scored_and_stage_changed(pool):
+    # Bug caught: history missing the scored or stage_changed event
+    account_id = await add_account(pool, "Aurora", "aurora.com", 2400, "India")
+
+    await score_account(account_id, pool)
+
+    events = sorted(row["event_type"] for row in await get_events(pool, account_id))
+    assert events == ["scored", "stage_changed"]
+
+
+async def test_scored_row_has_the_score(pool):
+    # Bug caught: scored row saved without score
+    account_id = await add_account(pool, "Aurora", "aurora.com", 2400, "India")
+
+    await score_account(account_id, pool)
+
+    scores = [row["score"] for row in await get_events(pool, account_id) if row["event_type"] == "scored"]
+    assert scores == [100]
+
+
+async def test_rescore_keeps_old_score_in_history(pool):
+    # Bug caught: rescoring overwrites the old score (must ADD, not replace)
+    account_id = await add_account(pool, "Bright", "bright.com", 13, "Japan")
+    await score_account(account_id, pool)  # 25
+
+    async with pool.acquire() as connection:
+        await connection.execute("update accounts set employees = 1300 where id = $1", account_id)
+    await score_account(account_id, pool)  # 70
+
+    scores = sorted(row["score"] for row in await get_events(pool, account_id) if row["event_type"] == "scored")
+    assert scores == [25, 70]
+    assert (await get_account(pool, account_id))["stage"] == "qualified"
+
+
+async def test_no_stage_changed_when_stage_is_the_same(pool):
+    # Bug caught: stage_changed written even when nothing changed
+    account_id = await add_account(pool, "Aurora", "aurora.com", 2400, "India")
+    await score_account(account_id, pool)
+    await score_account(account_id, pool)
+
+    events = [row["event_type"] for row in await get_events(pool, account_id)]
+    assert events.count("scored") == 2
+    assert events.count("stage_changed") == 1
+
+
+async def test_missing_data_still_scored(pool):
+    # Bug caught: crash on missing employees/country
+    account_id = await add_account(pool, "Alder", "alder.com")
+
+    await score_account(account_id, pool)
+
+    account = await get_account(pool, account_id)
+    assert account["score"] == 0
+    assert account["stage"] == "disqualified"
+
+
+async def test_missing_account_raises_malformed_job(pool):
+    # Bug caught: job for a deleted account retried forever instead of parked
+    with pytest.raises(MalformedJob):
+        await score_account("00000000-0000-0000-0000-000000000000", pool)
+
+===== tests\test_slack_client.py =====
+
+import httpx
+import pytest
+
+from scripts.slack_client import SlackClient
+
+FAKE_URL = "https://hooks.slack.com/services/TEST/TEST/TEST"
+
+
+def client_returning(status, text="", headers=None):
+    def handler(request):
+        return httpx.Response(status, text=text, headers=headers or {})
+    return SlackClient(FAKE_URL, transport=httpx.MockTransport(handler))
+
+
+def client_raising(exc):
+    def handler(request):
+        raise exc
+    return SlackClient(FAKE_URL, transport=httpx.MockTransport(handler))
+
+
+@pytest.mark.asyncio
+async def test_ok_means_sent():
+    result = await client_returning(200, "ok").send({"text": "hi"})
+    assert result.outcome == "sent"
+
+
+@pytest.mark.asyncio
+async def test_429_means_rate_limited_with_wait():
+    result = await client_returning(429, headers={"Retry-After": "12"}).send({"text": "hi"})
+    assert result.outcome == "rate_limited"
+    assert result.retry_after == 12
+
+
+@pytest.mark.asyncio
+async def test_500_means_retry():
+    result = await client_returning(503).send({"text": "hi"})
+    assert result.outcome == "retry"
+
+
+@pytest.mark.asyncio
+async def test_archived_channel_means_park():
+    result = await client_returning(410, "channel_is_archived").send({"text": "hi"})
+    assert result.outcome == "park"
+    assert "channel_is_archived" in result.error
+
+
+@pytest.mark.asyncio
+async def test_timeout_means_retry():
+    result = await client_raising(httpx.ReadTimeout("slow")).send({"text": "hi"})
+    assert result.outcome == "retry"
+    assert result.error == "timeout"
+
+
+@pytest.mark.asyncio
+async def test_error_never_contains_the_url():
+    exc = httpx.ConnectError(f"cannot connect to {FAKE_URL}")
+    result = await client_raising(exc).send({"text": "hi"})
+    assert result.outcome == "retry"
+    assert "hooks.slack.com" not in result.error
+
+
+===== tests\test_slack_settings.py =====
+
+from scripts.slack_settings import is_slack_enabled, set_slack_enabled
+
+async def test_switch_off_and_on(pool):
+    async with pool.acquire() as conn:
+        await set_slack_enabled(conn, False)
+        assert await is_slack_enabled(conn) is False
+
+        await set_slack_enabled(conn, True)
+        assert await is_slack_enabled(conn) is True
+
+async def test_missing_switch_counts_as_off(pool):
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM settings WHERE key = 'slack_enabled'")
+        assert await is_slack_enabled(conn) is False
+        await set_slack_enabled(conn, True)  # put it back for other tests
+
+===== tests\__init__.py =====
+
+
+===== docker-compose.yml =====
+
+x-app-env: &app-env
+  api_token: ${api_token:-change-me}
+  db_name: revenue_project
+  db_user: postgres
+  db_pass: postgres
+  db_host: postgres
+  db_port: "5432"
+  AWS_ENDPOINT_URL: http://localstack:4566
+  AWS_REGION: us-east-1
+  AWS_ACCESS_KEY_ID: test
+  AWS_SECRET_ACCESS_KEY: test
+  SCORING_QUEUE_NAME: scoring-jobs
+  SCORING_DLQ_NAME: scoring-jobs-dlq
+  AUDIT_BUCKET_NAME: scoring-audit
+  PYTHONUNBUFFERED: "1"
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: revenue_project
+    ports:
+      - "5434:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 30s
+      retries: 20
+
+  localstack:
+    image: localstack/localstack:4.4
+    environment:
+      SERVICES: sqs,s3
+    ports:
+      - "4566:4566"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4566/_localstack/health"]
+      interval: 3s
+      retries: 30
+
+  setup:
+    build: .
+    command: python scripts/setup_queues.py
+    environment: *app-env
+    depends_on:
+      localstack:
+        condition: service_healthy
+
+  api:
+    build: .
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    environment: *app-env
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      setup:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/docs')"]
+      interval: 3s
+      retries: 30
+
+  worker:
+    build: .
+    command: python -m scripts.main
+    environment: *app-env
+    depends_on:
+      api:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+
+===== Dockerfile =====
+
+FROM python:3.11-slim
+
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY . .
+
+===== import_trigger.py =====
+
+import httpx
+import argparse
+import json
+from dotenv import load_dotenv
+import os
+load_dotenv()
+parser = argparse.ArgumentParser()
+parser.add_argument("file")
+args = parser.parse_args()
+with open (f"Data/{args.file}",encoding="utf-8") as f:
+    companies = json.load(f)
+api_base_url = os.getenv("api_base_url")
+api_token = os.getenv("api_token")
+headers = {"Authorization":f"Bearer {api_token}"}
+for i,company in enumerate(companies,start=1):
+    try:
+        response = httpx.post(f"{api_base_url}/companies", headers=headers, json=company)
+        if response.status_code in (200, 201):
+            print(f"Line {i}: imported")
+        elif response.status_code == 409:
+            print(f"Line {i}: already exists, skipped")
+        else:
+            print(f"Line {i}: failed ({response.status_code}) {response.text}")
+    except Exception as e:
+        print(f"Line {i}: error ({e})")
+print(response.text)
+    
+
+===== pytest.ini =====
+
+[pytest]
+pythonpath = .
+testpaths = tests
+asyncio_mode = auto
+asyncio_default_fixture_loop_scope = function
+
+===== Readme.md =====
+
+# REV-INT-05 Â· Score and rank accounts
+
+Sales has a list of target companies and no way to tell which ones to call first.
+This project imports that list, scores every company automatically in the
+background, and gives sales a ranked list so they call the most promising
+companies first.
+
+There is no user interface. **The API and the command line are the interface.**
+
+---
+
+## How it works
+
+```
+companies.json
+     â”‚
+     â–¼
+import_trigger.py â”€â”€POST /companiesâ”€â”€â–¶ FastAPI â”€â”€â–¶ PostgreSQL (accounts + "created" history row)
+                                          â”‚
+                                          â””â”€â”€â–¶ SQS queue: {"task": "score_account", "account_id", "idempotency_key"}
+                                                   â”‚
+                                                   â–¼
+                                                Worker â”€â”€â–¶ PostgreSQL (score, stage, "scored" / "stage_changed" history)
+                                                   â”‚
+                                                   â””â”€â”€â–¶ S3 bucket (audit record for this scoring run)
+
+GET /ranking?stage=qualified  â”€â”€â–¶  accounts sorted by score, highest first
+```
+
+| Component | File(s) | Job |
+|-----------|---------|-----|
+| Import command | `import_trigger.py` | Reads a companies JSON file and sends each company to the API, one at a time |
+| API | `app/` | Validates and cleans each company, saves it, writes history, queues a scoring job. Also serves the ranking and rescore endpoints |
+| Database | `sql_migrations/` | `accounts` (current score and stage) and `history` (every event). Migrations run automatically when the API starts |
+| Queue | SQS in LocalStack | Holds scoring jobs. Failed jobs move to a dead-letter queue (DLQ) after 3 tries |
+| Worker | `scripts/main.py`, `scripts/handlers.py` | Takes jobs from the queue, scores the account, saves the result, writes the audit record |
+| Scoring rule | `scripts/scoring_rule.py` | The rule itself, in one place |
+| Audit bucket | S3 in LocalStack | One JSON record per scoring run |
+
+**Why scoring runs in the background:** the API answers immediately instead of
+waiting for scoring, a slow or failing scoring step can't break the import, and
+jobs survive a worker crash because they wait in the queue until they succeed.
+
+---
+
+## Setup
+
+### Requirements
+
+- Python 3.11+
+- PostgreSQL
+- Docker (for LocalStack)
+
+### 1. Install Python packages
+
+```
+python -m venv venv
+venv\Scripts\activate            # Windows
+source venv/bin/activate         # Mac / Linux
+
+pip install -r requirements.txt
+```
+
+### 2. Create your `.env`
+
+Copy `.env.example` to `.env` and fill in your own values. `.env` is in
+`.gitignore` and must never be committed.
+
+| Setting | Meaning |
+|---------|---------|
+| `api_token` | Token the API expects in `Authorization: Bearer <token>` |
+| `api_base_url` | Where the import and rescore commands send requests |
+| `db_name`, `db_user`, `db_pass`, `db_host`, `db_port` | Your PostgreSQL database |
+| `AWS_ENDPOINT_URL`, `AWS_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | LocalStack connection (dummy keys are fine) |
+| `SCORING_QUEUE_NAME`, `SCORING_DLQ_NAME` | Queue names |
+| `AUDIT_BUCKET_NAME` | S3 bucket for audit records |
+| `test_db_name`, `test_db_user`, `test_db_pass`, `test_db_host`, `test_db_port` | A **separate** database for the tests |
+
+On Windows, use `127.0.0.1` instead of `localhost` in URLs. `localhost` tries
+IPv6 first and adds about 2 seconds to every request.
+
+### 3. Create the database
+
+```
+psql -U postgres -c "create database revenue_project;"
+```
+
+You don't create tables by hand. The API applies every file in
+`sql_migrations/` at startup, in order, and records each one in
+`track_migration` so it only runs once.
+
+### 4. Start LocalStack and create the queues and bucket
+
+```
+docker run -d --name localstack -p 4566:4566 -e SERVICES=sqs,s3 localstack/localstack:4.4
+python scripts/setup_queues.py
+```
+
+After the first time, use `docker start localstack`.
+
+> LocalStack keeps queues and buckets in memory. **Every time it restarts, run
+> `python scripts/setup_queues.py` again**, or the API fails at startup with
+> "The specified queue does not exist".
+
+Version `4.4` is used on purpose: newer LocalStack images require an auth token.
+
+### 5. Start the API and the worker
+
+In two separate terminals, from the project folder:
+
+```
+python -m uvicorn app.main:app --reload
+python -m scripts.main
+```
+
+Use `python -m ...` so the `app` and `scripts` packages can be imported.
+
+---
+
+## How to import
+
+```
+python import_trigger.py companies_20.json
+```
+
+The file is read from the `Data/` folder. Each line is reported:
+
+| Output | Meaning |
+|--------|---------|
+| `imported` | New account created and a scoring job queued |
+| `already exists, skipped` | A company with the same domain is already in the system (409). No new account, no new job |
+| `failed (422) ...` | The record is invalid (missing name or domain, bad employee count, not an object). It is skipped and the rest of the file continues |
+
+Within about a minute, the worker scores every new account.
+
+**Running the same file again is safe.** Every company is reported as already
+existing, nothing is duplicated, and nothing is scored twice.
+
+### What gets cleaned
+
+Domains are normalised before saving, so messy and clean spellings of the same
+company are treated as one company:
+
+| In the file | Stored as |
+|-------------|-----------|
+| `https://WWW.Example.com/` | `example.com` |
+| `http://example.com/about/team` | `example.com` |
+| `  Example.COM  ` | `example.com` |
+
+### Sample files
+
+| File | Purpose |
+|------|---------|
+| `Data/companies.json` | 100 sample companies |
+| `Data/companies_20.json` | 20 companies with a known, hand-checked ranking (10 qualified) |
+| `Data/companies_messy.json` | Messy domains, missing fields, a duplicate, and broken records |
+
+All company data is fictional.
+
+---
+
+## How scoring works
+
+**Score = size points + market points** (0 to 100)
+
+| Employees | Size points |
+|-----------|------------:|
+| 1000 or more | 60 |
+| 200 â€“ 999 | 45 |
+| 50 â€“ 199 | 30 |
+| 1 â€“ 49 | 15 |
+| Missing, 0, or negative | 0 |
+
+| Country | Market points |
+|---------|--------------:|
+| India, USA (Tier 1) | 40 |
+| United Kingdom, Germany, Singapore, Australia, Canada (Tier 2) | 25 |
+| Any other country | 10 |
+| Missing or empty | 0 |
+
+**Stage:** a score of **60 or more** is `qualified`; below 60 is `disqualified`.
+
+**Example:** FalconNest Technologies has 749 employees (45) and is in India (40),
+so it scores **85** and is qualified.
+
+### Missing data
+
+A company with missing fields still gets an account and a score. A missing
+field simply earns **0 points** for that part:
+
+| Company | Size | Market | Score | Stage |
+|---------|-----:|-------:|------:|-------|
+| No employee count, India | 0 | 40 | 40 | disqualified |
+| 1500 employees, no country | 60 | 0 | 60 | qualified |
+| Nothing but name and domain | 0 | 0 | 0 | disqualified |
+
+Country names must match exactly (for example `United Kingdom`, not `UK`, and
+`India`, not `india`). Anything else counts as "any other country".
+
+### Changing the rule
+
+Every number lives at the top of `scripts/scoring_rule.py` (`THRESHOLD`,
+`TIER_1`, `TIER_2`, the size bands, and `RULE_VERSION`). Change it there,
+bump `RULE_VERSION`, and update the tests.
+
+**Accounts that are already scored keep their old score and stage** until they
+are rescored. Each audit record stores the rule version and threshold used, so
+you can always tell which rule produced a score.
+
+---
+
+## How to see the ranking
+
+```
+GET /ranking                     all accounts, ranked
+GET /ranking?stage=qualified     qualified accounts only
+GET /ranking?stage=disqualified  disqualified accounts only
+```
+
+**Order:** score (highest first), then employees (highest first), then name
+(Aâ€“Z). Accounts that haven't been scored yet appear **at the end**.
+
+An unknown stage (for example `?stage=banana`) is rejected with **422** and a
+message listing the allowed values.
+
+PowerShell example:
+
+```powershell
+$headers = @{ Authorization = "Bearer <your token>" }
+Invoke-RestMethod -Uri "http://127.0.0.1:8000/ranking?stage=qualified" -Headers $headers |
+    Format-Table name, score, employees, country
+```
+
+Or open `http://127.0.0.1:8000/docs` and try it there.
+
+---
+
+## How to rescore
+
+Use this after correcting a company's data, for example its employee count.
+
+```
+python rescore_trigger.py <account_id> --employees 1300
+python rescore_trigger.py <account_id> --country India
+python rescore_trigger.py <account_id> --employees 1300 --country India
+```
+
+Find an account's id with:
+
+```sql
+select id, name from accounts where domain = 'brightleafsys.com';
+```
+
+This calls `POST /accounts/{account_id}/rescore`, which:
+
+1. Updates only the fields you sent (the others stay as they were)
+2. Adds an `updated` row to history
+3. Queues a new scoring job with a **new idempotency key**, so the worker scores it again
+
+The worker then saves the new score and stage and **adds** new history rows.
+Old history is never replaced, so you can see the score before and after.
+
+| Response | Meaning |
+|----------|---------|
+| `Rescore queued` (202) | Data updated, job queued |
+| `Account not found` (404) | No account with that id |
+| 422 | The id isn't a valid UUID, or a value has the wrong type |
+
+---
+
+## History and audit records
+
+### History table
+
+Every event for an account is a new row. Rows are never updated or deleted.
+
+| `event_type` | Written by | When |
+|--------------|-----------|------|
+| `created` | API | The account is imported |
+| `scored` | Worker | Every time the account is scored (stores score, stage, time, and points) |
+| `stage_changed` | Worker | Only when the stage is different from before |
+| `updated` | API | The account's data is corrected through rescore |
+
+To see one account's history in order:
+
+```sql
+select event_type, score, stage, details, created_at
+from history
+where account_id = '<account id>'
+order by created_at;
+```
+
+**History survives deleting an account.** `history.account_id` is deliberately
+not a cascading foreign key, so deleting an account leaves its history in
+place. This is useful for audits and for answering "what happened to this
+company?" after it's gone.
+
+### Audit records (S3)
+
+Every scoring run writes one JSON record to the audit bucket, including the
+inputs (employees, country), the points for each part, the score, threshold,
+stage, previous stage, rule version, and time. To list and open them:
+
+```
+python scripts/check_s3.py
+```
+
+---
+
+## What stops duplicates
+
+| Problem | Protection |
+|---------|-----------|
+| Same company imported twice | `accounts.domain` is unique. The second insert fails and the API returns 409 before any history row or job is created |
+| Same company with a differently written domain | Domains are cleaned before saving, so they become identical and hit the unique rule |
+| Same queue message delivered twice | Each job carries an idempotency key. The worker checks the audit bucket and skips a key it has already completed |
+
+SQS standard queues can deliver a message more than once, so the worker never
+relies on the queue alone to prevent duplicates.
+
+---
+
+## What happens when each step fails
+
+| Step | Failure | What happens |
+|------|---------|--------------|
+| Import file | A record is invalid (missing name/domain, `"abc"` employees, not an object) | API returns 422. The command prints it as failed and **continues** with the rest |
+| Import file | The same company is already in the system | API returns 409. Reported as "already exists". No new account, history row, or job |
+| API | Wrong or missing token | 401. Nothing is saved |
+| API | Saving the account or its history fails | Both are in one transaction, so neither is saved |
+| API | The account is saved but sending the job to the queue fails | The account exists without a score. Fix it with the rescore command |
+| Queue | The worker is stopped or crashes mid-import | Unfinished jobs stay in the queue. A job is only deleted **after** it succeeds, so when the worker restarts, it continues with no lost or duplicated accounts |
+| Worker | A job fails (for example, the database is briefly unavailable) | The job is not deleted. It reappears after the visibility timeout (30 s) and is retried |
+| Worker | A job keeps failing | After 3 attempts SQS moves it to the DLQ (`scoring-jobs-dlq`) instead of retrying forever |
+| Worker | A message can never succeed (bad JSON, missing fields, unknown task, account no longer exists) | Sent straight to the DLQ with the error reason, and removed from the main queue |
+| Worker | Ctrl+C or SIGTERM | Finishes the current message, then stops cleanly |
+| LocalStack | Restarted | Queues and bucket are gone. Run `python scripts/setup_queues.py` again |
+
+Useful helper scripts:
+
+| Script | What it does |
+|--------|-------------|
+| `scripts/setup_queues.py` | Creates the queue, the DLQ (with redrive policy), and the audit bucket |
+| `scripts/purge_queue.py` | Empties the queue and the DLQ |
+| `scripts/check_s3.py` | Lists audit records and prints one |
+
+---
+
+## Tests
+
+```
+python -m pytest -v
+```
+
+| File | What it covers |
+|------|---------------|
+| `test_scoring_rule.py` | Every size band and boundary, every country tier, missing data, the threshold, and the hand-checked examples |
+| `test_domain_cleaning.py` | Domain cleaning, required and optional fields |
+| `test_parse_job.py` | The worker's message checks (bad JSON, missing fields, unknown task) |
+| `test_companies_api.py` | Import: created, cleaned, history row, job queued, duplicates, 422, 401 |
+| `test_ranking_api.py` | Sort order, tie-breaks, unscored last, stage filter, 422 for an unknown stage |
+| `test_rescore_api.py` | Rescore: 202, data updated, `updated` history, new key each time, 404, 422 |
+| `test_score_handler.py` | Worker handler: score saved, history events, rescore adds instead of replacing |
+
+Each test has a comment explaining which bug it would catch.
+
+### How the API and worker tests run
+
+- They use a **separate test database** (`test_db_name` in `.env`). Create it once:
+  `psql -U postgres -c "create database revenue_test;"`
+- Before each test, `accounts` and `history` are emptied.
+- Migrations are applied to the test database automatically.
+- Requests go straight into the FastAPI app (no uvicorn needed), and a **fake SQS**
+  records sent jobs instead of using LocalStack.
+- The worker handler is called directly with the test database.
+
+**Never point `test_db_name` at your real database.** The tests empty its tables.
+
+### CI
+
+GitHub Actions (`.github/workflows/ci.yml`) runs the full test suite on every
+push and pull request, with a real PostgreSQL service and fake settings.
+
+===== requirements.txt =====
+
+annotated-doc==0.0.5
+annotated-types==0.8.0
+anyio==4.15.1
+asyncpg==0.32.0
+boto3==1.43.119
+botocore==1.43.119
+certifi==2026.10.23
+click==8.5.0
+colorama==0.4.6
+fastapi==0.162.0
+h11==0.16.0
+httpcore==1.0.9
+httpx==0.28.1
+idna==3.20
+iniconfig==2.3.1
+jmespath==1.1.0
+opentelemetry-api==1.45.1
+packaging==26.3
+pluggy==1.7.0
+pydantic==2.14.1
+pydantic-settings==2.16.1
+pydantic_core==2.50.1
+Pygments==2.21.0
+pytest==9.2.0
+pytest-asyncio==1.4.1.post1
+python-dateutil==2.9.0.post0
+python-dotenv==1.2.4
+s3transfer==0.19.3
+six==1.17.0
+starlette==1.10.0
+typing-inspection==0.4.4
+typing_extensions==4.16.0
+urllib3==2.8.0
+uvicorn==0.54.0
+
+
+===== rescore_trigger.py =====
+
+import httpx
+import argparse
+import json
+from dotenv import load_dotenv
+import os
+load_dotenv()
+parser = argparse.ArgumentParser()
+parser = argparse.ArgumentParser()
+parser.add_argument("account_id")
+parser.add_argument("--employees", type=int)
+parser.add_argument("--country")
+args = parser.parse_args()
+body = {}
+if args.employees is not None:
+    body["employees"] = args.employees
+if args.country is not None:
+    body["country"] = args.country
+url = f"{os.getenv('API_BASE_URL')}/accounts/{args.account_id}/rescore"
+headers = {"Authorization": f"Bearer {os.getenv('API_TOKEN')}"}
+response = httpx.post(url, headers=headers, json=body)
+
+# 4. print result
+if response.status_code == 202:
+    print("Rescore queued")
+elif response.status_code == 404:
+    print("Account not found")
+else:
+    print(f"Failed ({response.status_code}): {response.text}")
