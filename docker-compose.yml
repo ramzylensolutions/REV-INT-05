@@ -72,6 +72,15 @@ services:
     depends_on:
       api:
         condition: service_healthy
-
+  sender:
+    build: .
+    command: python -m scripts.sender_main
+    environment:
+      <<: *app-env
+      SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL}
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
 volumes:
   pgdata:
