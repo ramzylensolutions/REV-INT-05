@@ -78,6 +78,7 @@ services:
     environment:
       <<: *app-env
       SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL}
+      DIGEST_TIME: ${DIGEST_TIME:-09:00}
     depends_on:
       api:
         condition: service_healthy

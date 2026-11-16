@@ -6,6 +6,8 @@ from app.config import Settings
 from app.db_conn import create_pool
 from scripts.sender import send_next
 from scripts.slack_client import SlackClient
+import time
+from scripts.digest import is_due, local_now, send_digest
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("sender")
@@ -27,7 +29,20 @@ async def sleep_or_stop(seconds: float) -> None:
         await asyncio.wait_for(stop.wait(), timeout=seconds)
     except asyncio.TimeoutError:
         pass
+DIGEST_CHECK_EVERY = 60  # seconds: how often to ask "is the digest due?"
 
+
+async def maybe_send_digest(pool, slack) -> None:
+    """If it's a weekday after the digest time, send today's digest (only once)."""
+    try:
+        if not is_due(local_now()):
+            return
+        result = await send_digest(pool, slack, kind="scheduled")
+    except Exception as exc:
+        log.error("Digest error: %s", type(exc).__name__)
+        return
+    if result is not None:
+        log.info("Digest %s", result["outcome"])
 
 async def run() -> None:
     if Settings.slack_webhook_url is None:
@@ -36,9 +51,12 @@ async def run() -> None:
     slack = SlackClient(Settings.slack_webhook_url.get_secret_value())
     pool = await create_pool()
     log.info("Sender started")
-
+    next_digest_check = 0.0
     try:
         while not stop.is_set():
+            if time.monotonic() >= next_digest_check:
+                next_digest_check = time.monotonic() + DIGEST_CHECK_EVERY
+                await maybe_send_digest(pool, slack)
             try:
                 result = await send_next(pool, slack)
             except Exception as exc:

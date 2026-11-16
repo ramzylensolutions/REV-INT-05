@@ -8,6 +8,9 @@ class settings(BaseSettings):
     db_port:int
     api_token:str
     slack_webhook_url: SecretStr | None = None
+    slack_webhook_url: SecretStr | None = None
+    digest_time: str = "09:00"
+    digest_timezone: str = "Asia/Kolkata"
     AUDIT_BUCKET_NAME:str
     model_config=SettingsConfigDict(
         env_file=".env",
