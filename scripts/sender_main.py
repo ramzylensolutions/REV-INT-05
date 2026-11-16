@@ -4,11 +4,14 @@ import signal
 
 from app.config import Settings
 from app.db_conn import create_pool
-from scripts.sender import send_one_alert
+from scripts.sender import send_next
 from scripts.slack_client import SlackClient
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("sender")
+
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 stop = asyncio.Event()
 
@@ -37,7 +40,7 @@ async def run() -> None:
     try:
         while not stop.is_set():
             try:
-                result = await send_one_alert(pool, slack)
+                result = await send_next(pool, slack)
             except Exception as exc:
                 log.error("Sender error: %s", type(exc).__name__)
                 await sleep_or_stop(5)
@@ -47,10 +50,12 @@ async def run() -> None:
                 await sleep_or_stop(2)                      # nothing waiting
             elif result["outcome"] == "rate_limited":
                 log.warning("Slack rate limit, waiting %s s", result["retry_after"])
-                await sleep_or_stop(result["retry_after"])  # Slack asked us to wait
             else:
-                log.info("Alert %s", result["outcome"])
-                await sleep_or_stop(1)                      # about 1 message per second
+                if "count" in result:
+                    log.info("Summary of %s alerts %s", result["count"], result["outcome"])
+                else:
+                    log.info("Alert %s", result["outcome"])
+                await sleep_or_stop(1)
     finally:
         await pool.close()
         log.info("Sender stopped cleanly")
